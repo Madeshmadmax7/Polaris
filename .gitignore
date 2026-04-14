@@ -1,0 +1,42 @@
+# LifeOS .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+env/
+.env
+
+# Node
+node_modules/
+frontend/dist/
+frontend/build/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Databases
+*.db
+*.sqlite3
+
+# FAISS indices
+faiss_indices/
+
+# Extension build
+extension/icons/*.png
+
+# Docker
+.docker/
+
+# OS
+Thumbs.db
+Desktop.ini

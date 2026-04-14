@@ -1,0 +1,781 @@
+═══════════════════════════════════════════════════════════════════════════════
+1. ACTIVITY TRACKING LOGIC (Chrome Extension)
+═══════════════════════════════════════════════════════════════════════════════
+
+// Service Worker (background.js) - Main tracking engine
+chrome.tabs.onActivated.addListener((activeInfo) => {
+    chrome.tabs.get(activeInfo.tabId, (tab) => {
+        const activityLog = {
+            timestamp: Date.now(),
+            domain: extractDomain(tab.url),
+            page_title: tab.title,
+            tab_id: activeInfo.tabId,
+            is_active: true,
+            duration_seconds: 0
+        };
+        
+        classifyContent(activityLog);
+        bufferActivity(activityLog);
+        updateLocalScore();
+    });
+});
+
+// Domain extraction utility
+function extractDomain(url) {
+    try {
+        const urlObj = new URL(url);
+        return urlObj.hostname.replace('www.', '');
+    } catch (e) {
+        return 'unknown';
+    }
+}
+
+// Local buffering for offline support
+const activityBuffer = [];
+const BATCH_SIZE = 10;
+const BATCH_INTERVAL = 10000; // 10 seconds
+
+chrome.alarms.create('flushActivityBuffer', { periodInMinutes: 0.1667 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'flushActivityBuffer' && activityBuffer.length > 0) {
+        transmitActivitiesBatch(activityBuffer.splice(0, BATCH_SIZE));
+    }
+});
+
+// Store activity locally
+function bufferActivity(activity) {
+    activityBuffer.push(activity);
+    if (activityBuffer.length >= BATCH_SIZE) {
+        chrome.alarms.trigger('flushActivityBuffer');
+    }
+}
+
+// Transmission with retry logic
+async function transmitActivitiesBatch(batch) {
+    try {
+        const token = await getStoredAuthToken();
+        const response = await fetch('http://localhost:8000/api/tracking/log', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ activities: batch })
+        });
+        
+        if (!response.ok) {
+            // Re-buffer on failure for retry
+            activityBuffer.unshift(...batch);
+        }
+    } catch (error) {
+        console.error('Transmission failed:', error);
+        // Re-buffer for offline retry
+        activityBuffer.unshift(...batch);
+    }
+}
+
+═══════════════════════════════════════════════════════════════════════════════
+2. NLP-BASED CONTENT CLASSIFICATION
+═══════════════════════════════════════════════════════════════════════════════
+
+// STAGE 1: Domain Heuristics (Local Extension)
+const DOMAIN_RULES = {
+    productive: ['github.com', 'stackoverflow.com', 'coursera.org', 'udemy.com', 
+                 'fastapi.io', 'python.org', 'developer.mozilla.org'],
+    distracting: ['instagram.com', 'tiktok.com', 'facebook.com', 'twitter.com', 
+                  'reddit.com', 'twitch.tv', 'youtube-shorts.com'],
+    neutral: ['google.com', 'wikipedia.org', 'aws.amazon.com', 'azure.microsoft.com']
+};
+
+function classifyByDomain(domain) {
+    for (const [category, domains] of Object.entries(DOMAIN_RULES)) {
+        if (domains.includes(domain)) {
+            return category;
+        }
+    }
+    return 'neutral'; // default
+}
+
+// STAGE 2: YouTube Content Analysis (Extension)
+async function classifyYouTubeContent(title) {
+    const learningKeywords = [
+        'tutorial', 'course', 'learn', 'programming', 'algorithm', 'data structures',
+        'DSA', 'Python', 'JavaScript', 'Java', 'C++', 'database', 'api', 'rest',
+        'machine learning', 'AI', 'neural network', 'tensorflow', 'pytorch',
+        'how to', 'explained', 'beginner', 'advanced', 'web development'
+    ];
+    
+    const titleLower = title.toLowerCase();
+    const hasLearningKeyword = learningKeywords.some(keyword => 
+        titleLower.includes(keyword)
+    );
+    
+    const entertainmentKeywords = ['gaming', 'funny', 'fail', 'music', 'vlog', 'shorts'];
+    const hasEntertainmentKeyword = entertainmentKeywords.some(keyword => 
+        titleLower.includes(keyword)
+    );
+    
+    if (hasLearningKeyword && !hasEntertainmentKeyword) {
+        return 'productive';
+    } else if (hasEntertainmentKeyword) {
+        return 'distracting';
+    } else {
+        return 'neutral';
+    }
+}
+
+// STAGE 3: Backend Advanced Classification (FastAPI)
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+model = SentenceTransformer('all-MiniLM-L6-v2')  # 384-dim embeddings
+
+async def classify_content_semantic(content_text: str, domain: str) -> dict:
+    """
+    Advanced semantic classification using embeddings
+    Returns: { category: str, confidence: float, matched_topic: str }
+    """
+    # Generate embedding
+    embedding = model.encode(content_text, convert_to_tensor=True)
+    
+    # Query FAISS for similarity
+    distances, indices = faiss_index.search(
+        np.array([embedding.cpu()]), k=5
+    )
+    
+    # Determine classification
+    top_distance = distances[0][0]
+    matched_topic = curriculum_topics[indices[0][0]]
+    
+    if top_distance < 0.3:  # High similarity threshold
+        return {
+            'category': 'productive',
+            'confidence': 1 - top_distance,
+            'matched_topic': matched_topic
+        }
+    elif top_distance < 0.5:
+        return {
+            'category': 'neutral',
+            'confidence': 0.5,
+            'matched_topic': None
+        }
+    else:
+        return {
+            'category': 'distracting',
+            'confidence': top_distance,
+            'matched_topic': None
+        }
+
+═══════════════════════════════════════════════════════════════════════════════
+3. FAISS SEMANTIC MATCHING (Video to Curriculum)
+═══════════════════════════════════════════════════════════════════════════════
+
+import faiss
+from sentence_transformers import SentenceTransformer
+
+class CurriculumMatcher:
+    def __init__(self):
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.curriculum_db = self.load_curriculum()
+        self.faiss_index = self.build_index()
+    
+    def load_curriculum(self):
+        """Load curriculum topics and descriptions"""
+        curriculum = {
+            'data_structures': {
+                'topics': ['arrays', 'linked_lists', 'stacks', 'queues', 'trees', 
+                          'graphs', 'hash_tables'],
+                'keywords': ['DSA', 'data structures', 'algorithm', 'complexity']
+            },
+            'machine_learning': {
+                'topics': ['supervised_learning', 'classification', 'regression', 
+                          'clustering', 'neural_networks'],
+                'keywords': ['machine learning', 'ML', 'AI', 'neural network']
+            },
+            'web_development': {
+                'topics': ['HTML', 'CSS', 'JavaScript', 'React', 'Node.js', 'REST'],
+                'keywords': ['web', 'frontend', 'backend', 'API', 'REST']
+            }
+        }
+        return curriculum
+    
+    def build_index(self):
+        """Build FAISS index from curriculum topics"""
+        all_texts = []
+        self.topic_map = []
+        
+        for course, data in self.curriculum_db.items():
+            for topic in data['topics']:
+                text = f"{topic} {' '.join(data['keywords'])}"
+                all_texts.append(text)
+                self.topic_map.append(f"{course}/{topic}")
+        
+        embeddings = self.model.encode(all_texts)
+        
+        # Create FAISS index
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)  # L2 distance
+        index.add(embeddings.astype('float32'))
+        
+        return index
+    
+    def match_video_to_curriculum(self, video_title: str, top_k: int = 5):
+        """Match video to curriculum topics"""
+        # Encode video title
+        video_embedding = self.model.encode(video_title).reshape(1, -1)
+        
+        # Search FAISS
+        distances, indices = self.faiss_index.search(
+            video_embedding.astype('float32'), top_k
+        )
+        
+        results = []
+        for dist, idx in zip(distances[0], indices[0]):
+            similarity = 1 / (1 + dist)  # Convert distance to similarity
+            results.append({
+                'topic': self.topic_map[idx],
+                'similarity_score': float(similarity),
+                'confidence': 'high' if similarity > 0.8 else 'medium' if similarity > 0.6 else 'low'
+            })
+        
+        return results
+
+matcher = CurriculumMatcher()
+video_title = "Dynamic Programming - Knapsack Problem Tutorial"
+matches = matcher.match_video_to_curriculum(video_title)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+4. PRODUCTIVITY SCORING ALGORITHM (FastAPI Backend)
+═══════════════════════════════════════════════════════════════════════════════
+
+async def compute_productivity_score(user_id: str, time_window_hours: int = 24) -> dict:
+    """
+    Compute dynamic productivity score (0-100)
+    Formula includes bonuses, penalties, and streak tracking
+    """
+    
+    # Get activities in time window
+    activities = await db.query(
+        "SELECT * FROM tracking_logs WHERE user_id = %s AND "
+        "timestamp > DATE_SUB(NOW(), INTERVAL %s HOUR)",
+        (user_id, time_window_hours)
+    )
+    
+    if not activities:
+        return {'score': 50, 'reason': 'no_activity'}
+    
+    # BASE SCORE
+    base_score = 50
+    
+    # CATEGORY COMPUTATION
+    productive_time = 0
+    neutral_time = 0
+    distracting_time = 0
+    
+    for activity in activities:
+        duration = activity['duration_seconds']
+        
+        if activity['category'] == 'productive':
+            productive_time += duration
+            base_score += (duration / 60) * 0.2  # +0.2 per minute productive
+        elif activity['category'] == 'neutral':
+            neutral_time += duration
+            base_score += 0  # No change
+        elif activity['category'] == 'distracting':
+            distracting_time += duration
+            base_score -= (duration / 60) * 0.3  # -0.3 per minute distracted
+    
+    # FRAGMENTATION PENALTY (excessive tab switching)
+    focus_sessions = identify_focus_sessions(activities)
+    for session in focus_sessions:
+        tab_switches = session['switch_count']
+        if tab_switches > 15:  # More than 15 switches in session
+            fragmentation_penalty = (tab_switches - 15) * 0.5
+            base_score -= fragmentation_penalty
+    
+    # FOCUS BONUS (sustained productive activity)
+    for session in focus_sessions:
+        duration_minutes = session['duration_seconds'] / 60
+        if duration_minutes >= 50:  # 50-minute focus session
+            base_score += 10
+    
+    # STREAK BONUS (consecutive high-performance days)
+    yesterday_score = await get_productivity_score(user_id, days_back=1)
+    today_score = base_score
+    
+    if yesterday_score > 70 and today_score > 70:
+        current_streak = await get_current_streak(user_id)
+        streak_bonus = current_streak * 2  # 2 points per day in streak
+        base_score += min(streak_bonus, 15)  # Cap at +15
+    else:
+        # Reset streak
+        await reset_streak(user_id)
+    
+    # CLAMP TO 0-100
+    final_score = max(0, min(100, base_score))
+    
+    return {
+        'score': final_score,
+        'productive_minutes': productive_time / 60,
+        'neutral_minutes': neutral_time / 60,
+        'distracting_minutes': distracting_time / 60,
+        'current_streak': await get_current_streak(user_id),
+        'timestamp': datetime.now()
+    }
+
+def identify_focus_sessions(activities):
+    """
+    Identify distinct focus sessions
+    Session = consecutive productive/neutral activities without distraction gaps >5min
+    """
+    sessions = []
+    current_session = None
+    
+    for activity in sorted(activities, key=lambda a: a['timestamp']):
+        time_gap = (activity['timestamp'] - current_session['last_timestamp']) / 60 \
+                  if current_session else 0
+        
+        if current_session and time_gap > 5:  # 5-minute break = new session
+            sessions.append(current_session)
+            current_session = None
+        
+        if current_session is None:
+            current_session = {
+                'start_time': activity['timestamp'],
+                'last_timestamp': activity['timestamp'],
+                'duration_seconds': 0,
+                'switch_count': 0,
+                'activities': []
+            }
+        
+        current_session['duration_seconds'] += activity['duration_seconds']
+        current_session['last_timestamp'] = activity['timestamp']
+        current_session['activities'].append(activity)
+        
+        if activity['category'] == 'distracting':
+            current_session['switch_count'] += 1
+    
+    if current_session:
+        sessions.append(current_session)
+    
+    return sessions
+
+
+═══════════════════════════════════════════════════════════════════════════════
+6. K-MEANS CLUSTERING (Behavior Pattern Recognition)
+═══════════════════════════════════════════════════════════════════════════════
+
+from sklearn.cluster import KMeans
+import numpy as np
+
+class BehaviorPatternAnalyzer:
+    """Analyze user behavior patterns using K-Means clustering"""
+    
+    async def identify_behavior_patterns(self, user_id: str, days: int = 30):
+        """
+        Cluster user behaviors to identify patterns
+        Each day = feature vector: [productive_mins, neutral_mins, distraction_mins, 
+                                    focus_count, avg_session_duration]
+        """
+        
+        # Get daily summaries
+        daily_summaries = await db.query(
+            "SELECT * FROM daily_summaries WHERE user_id = %s "
+            "AND date >= DATE_SUB(NOW(), INTERVAL %s DAY)",
+            (user_id, days)
+        )
+        
+        # Build feature matrix
+        X = []
+        dates = []
+        
+        for summary in daily_summaries:
+            features = [
+                summary['productive_minutes'],
+                summary['neutral_minutes'],
+                summary['distracting_minutes'],
+                summary['focus_session_count'],
+                summary['avg_session_duration'] if summary['focus_session_count'] > 0 else 0
+            ]
+            X.append(features)
+            dates.append(summary['date'])
+        
+        if len(X) < 3:
+            return {'status': 'insufficient_data'}
+        
+        X = np.array(X)
+        
+        # Normalize features
+        X_normalized = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+        
+        # Apply K-Means with k=3 (low, medium, high productivity days)
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        clusters = kmeans.fit_predict(X_normalized)
+        
+        # Analyze clusters
+        patterns = {}
+        for cluster_id in range(3):
+            cluster_indices = np.where(clusters == cluster_id)[0]
+            cluster_data = X[cluster_indices]
+            
+            avg_productive = cluster_data[:, 0].mean()
+            avg_distraction = cluster_data[:, 2].mean()
+            productivity_ratio = avg_productive / (avg_productive + avg_distraction + 1e-8)
+            
+            patterns[f'pattern_{cluster_id}'] = {
+                'cluster_id': cluster_id,
+                'day_count': len(cluster_indices),
+                'avg_productive_minutes': float(avg_productive),
+                'avg_distraction_minutes': float(avg_distraction),
+                'productivity_ratio': float(productivity_ratio),
+                'best_day_names': self.get_best_days_in_cluster(
+                    dates, cluster_indices
+                )
+            }
+        
+        # Return sorted by productivity ratio
+        patterns_sorted = sorted(
+            patterns.values(), 
+            key=lambda x: x['productivity_ratio'], 
+            reverse=True
+        )
+        
+        return {
+            'patterns': patterns_sorted,
+            'recommendation': self.generate_recommendation(patterns_sorted)
+        }
+    
+    def generate_recommendation(self, patterns):
+        """Generate personalized recommendation based on patterns"""
+        
+        high_productivity_pattern = patterns[0] if patterns else None
+        
+        if high_productivity_pattern:
+            best_days = high_productivity_pattern['best_day_names']
+            productivity_ratio = high_productivity_pattern['productivity_ratio']
+            
+            if productivity_ratio > 0.8:
+                return (
+                    f"Amazing! You have {high_productivity_pattern['day_count']} "
+                    f"highly productive days. Continue focusing during "
+                    f"these patterns: {', '.join(best_days)}"
+                )
+            elif productivity_ratio > 0.6:
+                return (
+                    f"Good progress! Try to replicate your successful patterns "
+                    f"from {', '.join(best_days)} on other days."
+                )
+            else:
+                return (
+                    "Your patterns show room for improvement. Focus on "
+                    "maintaining consistent productivity across all days."
+                )
+
+═══════════════════════════════════════════════════════════════════════════════
+7. PARENTAL CONTROL ENFORCEMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+class ParentalControlEngine:
+    """Enforce domain restrictions and monitor usage"""
+    
+    async def check_domain_access(self, user_id: str, domain: str, current_time: str) -> dict:
+        """
+        Check if domain access is permitted
+        Returns: {allowed: bool, reason: str, message: str}
+        """
+        
+        # Get parental rules for this user
+        rules = await db.query(
+            "SELECT * FROM parental_rules WHERE child_user_id = %s AND is_active = 1",
+            (user_id,)
+        )
+        
+        if not rules:
+            return {'allowed': True, 'reason': 'no_rules'}
+        
+        # Check focus hours
+        for rule in rules:
+            if rule['rule_type'] == 'focus_hours':
+                start_hour = rule['start_time'].hour  # Format: HH:MM
+                end_hour = rule['end_time'].hour
+                current_hour = int(current_time.split(':')[0])
+                
+                # Check blocked domains during focus hours
+                blocked_domains_str = rule['blocked_domains']  # JSON
+                blocked_domains = json.loads(blocked_domains_str)
+                
+                if current_hour >= start_hour and current_hour < end_hour:
+                    if domain in blocked_domains:
+                        # Log violation
+                        await self.log_violation(user_id, domain, rule['rule_id'])
+                        
+                        return {
+                            'allowed': False,
+                            'reason': 'blocked_during_focus_hours',
+                            'message': f"Access to {domain} is blocked during focus hours "
+                                      f"({rule['start_time']}-{rule['end_time']})",
+                            'rule_id': rule['rule_id']
+                        }
+        
+        # Check global restrictions
+        for rule in rules:
+            if rule['rule_type'] == 'global_block':
+                blocked_domains_str = rule['blocked_domains']
+                blocked_domains = json.loads(blocked_domains_str)
+                
+                if domain in blocked_domains:
+                    return {
+                        'allowed': False,
+                        'reason': 'globally_blocked',
+                        'message': f"Access to {domain} is blocked by parental controls"
+                    }
+        
+        # Check distraction threshold
+        for rule in rules:
+            if rule['rule_type'] == 'distraction_threshold':
+                threshold = rule['threshold_minutes']
+                
+                # Calculate today's distraction time
+                today_distraction = await db.query(
+                    "SELECT SUM(duration_seconds) as total FROM tracking_logs "
+                    "WHERE user_id = %s AND category = 'distracting' "
+                    "AND DATE(timestamp) = DATE(NOW())",
+                    (user_id,)
+                )
+                
+                today_distraction_mins = (today_distraction[0]['total'] or 0) / 60
+                
+                if today_distraction_mins >= threshold and domain in json.loads(rule['blocked_domains']):
+                    return {
+                        'allowed': False,
+                        'reason': 'distraction_limit_exceeded',
+                        'message': f"You've reached your daily distraction limit "
+                                  f"({today_distraction_mins:.0f}/{threshold} minutes)"
+                    }
+        
+        return {'allowed': True, 'reason': 'permitted'}
+    
+    async def log_violation(self, user_id: str, domain: str, rule_id: str):
+        """Log a parental control violation"""
+        
+        await db.execute(
+            "INSERT INTO parental_violations "
+            "(child_user_id, domain, rule_id, violation_time) "
+            "VALUES (%s, %s, %s, NOW())",
+            (user_id, domain, rule_id)
+        )
+        
+        # Get parent contact info and send notification
+        parent = await db.query(
+            "SELECT p.id, p.phone_number FROM users p "
+            "JOIN parent_child_relationships pc ON p.id = pc.parent_id "
+            "WHERE pc.child_id = %s",
+            (user_id,)
+        )
+        
+        if parent:
+            await send_sms(
+                parent[0]['phone_number'],
+                f"Parental Control Alert: Child attempted access to {domain} "
+                f"during restricted hours. Access blocked."
+            )
+
+═══════════════════════════════════════════════════════════════════════════════
+8. REAL-TIME WEBSOCKET BROADCASTING
+═══════════════════════════════════════════════════════════════════════════════
+
+from fastapi import WebSocket
+from typing import Set
+import asyncio
+
+class ConnectionManager:
+    """Manage WebSocket connections and real-time broadcasting"""
+    
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+        self.user_connections: dict = {}  # user_id -> WebSocket
+    
+    async def connect(self, websocket: WebSocket, user_id: str):
+        """Accept WebSocket connection"""
+        await websocket.accept()
+        self.active_connections.add(websocket)
+        
+        if user_id not in self.user_connections:
+            self.user_connections[user_id] = []
+        self.user_connections[user_id].append(websocket)
+    
+    async def disconnect(self, websocket: WebSocket, user_id: str):
+        """Close WebSocket connection"""
+        self.active_connections.discard(websocket)
+        if user_id in self.user_connections:
+            self.user_connections[user_id].remove(websocket)
+    
+    async def broadcast_score_update(self, user_id: str, score_data: dict):
+        """Broadcast real-time score update to user's connected clients"""
+        
+        if user_id not in self.user_connections:
+            return
+        
+        message = {
+            'type': 'score_update',
+            'score': score_data['score'],
+            'productive_minutes': score_data['productive_minutes'],
+            'streak': score_data['current_streak'],
+            'timestamp': str(score_data['timestamp'])
+        }
+        
+        disconnected = []
+        for connection in self.user_connections[user_id]:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                disconnected.append(connection)
+        
+        # Clean up disconnected clients
+        for conn in disconnected:
+            await self.disconnect(conn, user_id)
+    
+    async def broadcast_achievement(self, user_id: str, achievement_data: dict):
+        """Broadcast achievement unlock"""
+        
+        message = {
+            'type': 'achievement_unlock',
+            'achievement_id': achievement_data['achievement_id'],
+            'icon': achievement_data['icon'],
+            'xp': achievement_data['xp_reward']
+        }
+        
+        for connection in self.user_connections.get(user_id, []):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                pass
+    
+    async def broadcast_parental_alert(self, parent_id: str, alert_data: dict):
+        """Broadcast alert to parent"""
+        
+        message = {
+            'type': 'parental_alert',
+            'child_name': alert_data['child_name'],
+            'domain': alert_data['domain'],
+            'alert_type': alert_data['alert_type'],
+            'timestamp': str(alert_data['timestamp'])
+        }
+        
+        for connection in self.user_connections.get(parent_id, []):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                pass
+
+# FastAPI route
+@app.websocket("/ws/dashboard/{token}")
+async def websocket_endpoint(websocket: WebSocket, token: str):
+    """WebSocket endpoint for real-time dashboard updates"""
+    
+    try:
+        # Verify token and get user_id
+        user_id = verify_jwt_token(token)
+        
+        manager.connect(websocket, user_id)
+        
+        while True:
+            # Keep connection alive
+            data = await websocket.receive_text()
+            
+            if data == 'ping':
+                await websocket.send_text('pong')
+    
+    except Exception as e:
+        pass
+    finally:
+        await manager.disconnect(websocket, user_id)
+
+═══════════════════════════════════════════════════════════════════════════════
+9. QUIZ GENERATION (LLM Integration)
+═══════════════════════════════════════════════════════════════════════════════
+
+import anthropic
+import json
+
+class AdaptiveQuizGenerator:
+    """Generate adaptive quiz questions using Claude LLM"""
+    
+    def __init__(self):
+        self.client = anthropic.Anthropic()
+        self.model = "claude-3-5-sonnet-20241022"
+    
+    async def generate_quiz_questions(
+        self, 
+        topic: str, 
+        difficulty: str = 'medium',  # easy, medium, hard
+        count: int = 5,
+        learning_history: dict = None
+    ) -> list:
+        """
+        Generate contextual quiz questions for topic
+        """
+        
+        difficulty_prompt = {
+            'easy': 'Generate basic, introductory level questions',
+            'medium': 'Generate intermediate level questions that test understanding',
+            'hard': 'Generate advanced questions that require deep understanding and application'
+        }
+        
+        # Build context from learning history
+        context = ""
+        if learning_history:
+            prev_topics = learning_history.get('covered_topics', [])
+            context = f"User has previously learned: {', '.join(prev_topics)}\n"
+        
+        prompt = f"""
+You are an expert educational question generator. Generate {count} multiple choice quiz questions 
+for the following topic: {topic}
+
+Difficulty Level: {difficulty_prompt.get(difficulty, 'medium')}
+
+{context}
+
+For each question, provide:
+1. Question text
+2. Four multiple choice options (A, B, C, D)
+3. Correct answer
+4. Explanation
+5. Learning objective
+
+Format as JSON array.
+
+Example format:
+[
+  {{
+    "question": "What is the time complexity of binary search?",
+    "options": ["O(n)", "O(log n)", "O(n log n)", "O(n²)"],
+    "correct_answer": "B",
+    "explanation": "Binary search halves the search space each iteration...",
+    "learning_objective": "Understand logarithmic time complexity"
+  }}
+]
+
+Generate only the JSON, no additional text.
+"""
+        
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=2048,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            # Parse response
+            response_text = message.content[0].text
+            questions = json.loads(response_text)
+            
+            return questions
+        
+        except Exception as e:
+            print(f"Error generating questions: {e}")
+            return []
+

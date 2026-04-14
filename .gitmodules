@@ -1,0 +1,9 @@
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/Madeshmadmax7/polaris-ui.git
+[submodule "backend"]
+	path = backend
+	url = https://github.com/Madeshmadmax7/polaris-api.git
+[submodule "extension"]
+	path = extension
+	url = https://github.com/Madeshmadmax7/polaris-ext.git
