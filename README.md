@@ -118,14 +118,6 @@ Project structure (top-level)
 - `extension/` — Chrome extension source (Manifest v3)
 - `docs/` — (recommended) place for screenshots, deployment notes, and diagrams
 
-Screenshots / Visual assets
---------------------------
-Place image files in `docs/screenshots/` or `frontend/public/screenshots/`. This README intentionally removes inline placeholder text — add images in that path and they will render automatically.
-
-Suggested filenames:
-- `docs/screenshots/homepage.png`
-- `docs/screenshots/dashboard.png`
-- `docs/screenshots/extension.png`
 
 Contributing & review notes for HR
 ----------------------------------
