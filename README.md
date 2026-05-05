@@ -1,75 +1,92 @@
-# LifeOS
+# Polaris Tracker
 
-**Hybrid AI-Powered Digital Well-Being, Adaptive Learning & Ethical Parental Control Platform**
+Polaris is a lightweight tracker and parental-awareness dashboard that helps families and learners understand digital activity, focus, and study progress while respecting privacy.
 
-## Architecture
+Live demo: https://polaristracker.netlify.app
 
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Chrome Extension│◄──►│  FastAPI Backend  │◄──►│  React Dashboard│
-│  (Manifest v3)  │    │  + WebSockets     │    │  (Vite + React) │
-└────────┬────────┘    └────────┬─────────┘    └─────────────────┘
-         │                      │
-         │              ┌───────┴───────┐
-         │              │               │
-         │         ┌────▼────┐    ┌─────▼─────┐
-         │         │  MySQL  │    │   FAISS   │
-         │         │Database │    │Vector Store│
-         │         └─────────┘    └───────────┘
-         │
-    ┌────▼──────────┐
-    │ declarativeNet │
-    │ Request Rules  │
-    └───────────────┘
-```
+Overview
+--------
+Polaris provides a browser extension for lightweight activity tracking, a backend API for processing and persistence, and a web dashboard for visualization and parental controls.
 
-## Quick Start
+Core features
+-------------
+- Activity & focus tracking (idle/active detection)
+- User-friendly dashboard with session timelines and aggregated metrics
+- Study progress tracking and simple course/chapter completion states
+- Privacy-preserving design — minimal telemetry and no raw chat or query logging
+- Real-time sync and rule propagation via WebSockets
 
-### 1. Database Setup
-1. Ensure **MySQL** is running on port `3306`.
-2. Create the database:
-   ```bash
-   cd backend
-   python init_db.py
-   ```
+Tech stack
+----------
+- Frontend: Vite + React
+- Backend: FastAPI + Uvicorn
+- Database: MySQL (or compatible)
+- Optional: FAISS for semantic indexing
 
-### 2. Backend Setup
+Quick start (developer)
+-----------------------
+Clone the repo and follow these steps to run locally.
+
+1) Backend (Windows example)
+
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate  # Windows
+venv\Scripts\activate
 pip install -r requirements.txt
+python init_db.py
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 3. Frontend Setup
+2) Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-### 4. Extension Setup
-1. Open `chrome://extensions`
-2. Enable **Developer Mode**
-3. Click **Load unpacked**
-### 4. Extension Setup
-1. Open `chrome://extensions`
-2. Enable **Developer Mode**
-3. Click **Load unpacked**
-4. Select the `extension/` folder
+3) Chrome extension (optional)
 
-## Key Features
+1. Open `chrome://extensions` in Chrome/Edge
+2. Enable Developer Mode
+3. Click "Load unpacked" and select the `extension/` folder
 
-- **Smart Activity Tracking** – Active/idle detection, focus factor analysis
-- **Productivity Scoring** – Server-side mathematical model with fragmentation dampening
-- **RAG Learning Planner** – Syllabus-grounded AI study plans via FAISS
-- **Adaptive Quizzes** – Context-aware quiz generation with difficulty scaling
-- **Ethical Parental Controls** – Domain-level visibility, network-layer blocking
-- **Privacy-First** – No full URLs, no search queries, no chat content logged
-- **Offline-First** – Smart buffering with retry-on-reconnect
-- **Real-time Sync** – WebSocket-based blocking rule propagation
+Screenshots
+-----------
+Replace these placeholder images with your actual screenshots. Suggested path: `docs/screenshots/` or `frontend/public/screenshots/`.
 
-## License
+<!-- Centered large screenshots (replace paths with your images) -->
+<p align="center">
+   <img src="docs/screenshots/homepage.png" alt="Polaris Homepage" width="900" />
+</p>
+
+<p align="center">
+   <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="900" />
+</p>
+
+<p align="center">
+   <img src="docs/screenshots/extension.png" alt="Extension UI" width="600" />
+</p>
+
+If you want the images to display while working locally, add the files above and commit them; the markdown will render automatically on GitHub.
+
+Deployment
+----------
+- The live demo is hosted at: https://polaristracker.netlify.app
+- Frontend can be deployed to Netlify/Vercel; backend can be deployed to any container or cloud VM and configured with the production database.
+
+Contributing
+------------
+- Fork the repository and open a pull request with a clear description of changes.
+- For UI changes, include screenshots and short testing notes.
+
+License
+-------
 MIT
+
+Contact
+-------
+For questions, reach out via the project maintainer contact or open an issue in this repository.
+
 
