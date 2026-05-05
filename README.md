@@ -1,32 +1,90 @@
-# Polaris Tracker
+# Polaris Tracker — HR-ready Project Overview
 
-Polaris is a lightweight tracker and parental-awareness dashboard that helps families and learners understand digital activity, focus, and study progress while respecting privacy.
+Polaris is a privacy-first activity tracker and parental-awareness dashboard designed to help families and learners understand device activity, focus patterns, and study progress. This repository contains the browser extension, backend API, and frontend dashboard used in the project.
 
 Live demo: https://polaristracker.netlify.app
 
-Overview
---------
-Polaris provides a browser extension for lightweight activity tracking, a backend API for processing and persistence, and a web dashboard for visualization and parental controls.
+Table of contents
+-----------------
+- Project summary
+- Product features
+- Architecture & components
+- Data flow
+- Security & privacy
+- Tech stack
+- Deployment & hosting
+- Local development (quick start)
+- Project structure
+- Contributing & support
+- Screenshots (placeholders removed — add files in `docs/screenshots/`)
 
-Core features
--------------
-- Activity & focus tracking (idle/active detection)
-- User-friendly dashboard with session timelines and aggregated metrics
-- Study progress tracking and simple course/chapter completion states
-- Privacy-preserving design — minimal telemetry and no raw chat or query logging
-- Real-time sync and rule propagation via WebSockets
+Project summary
+---------------
+Polaris focuses on lightweight telemetry and clear, actionable visualizations for caregivers and learners. The system balances useful analytics (session timelines, focus scores, course progress) with privacy safeguards (no raw content logging, aggregated metrics only).
+
+Product features (high level)
+----------------------------
+- Activity tracking: active/idle detection, focused session identification
+- Dashboard: session timelines, daily/weekly summaries, per-user reports
+- Course progress: chapter-level completion tracking and progress aggregation
+- Parental controls: domain-level policy rules and lightweight blocking
+- Real-time sync: WebSocket-based updates for rules and notifications
+
+Architecture & components
+-------------------------
+High-level components:
+
+- Browser extension (Manifest v3): collects lightweight events and sends them to backend or buffers when offline.
+- Backend API (FastAPI): ingests events, computes metrics, persists to MySQL, exposes secure REST/WebSocket endpoints.
+- Frontend dashboard (Vite + React): visualizes activity, manages users/roles, and administers parental rules.
+- Optional FAISS index: semantic indexing for RAG features and contextual recommendations.
+
+ASCII architecture diagram
+
+```
+                  +-----------------+                +----------------+
+                  |   Browser       |  -- HTTPS -->   |  FastAPI       |
+                  |   Extension     |                |  Backend + DB  |
+                  +--------+--------+                +----+------+----+
+                               |                              |      |
+                               | WebSocket/HTTPS              |      | (optional)
+                               v                              v      v
+                        +----+-----+                  +-----+----+   +--------+
+                        | Frontend | <--- HTTPS --->  |  MySQL   |   |  FAISS |
+                        | Dashboard|                  +----------+   +--------+
+                        +----------+
+```
+
+Data flow
+---------
+1. The extension records lightweight events (timestamp, activity state, domain, session markers).
+2. Events are sent to the backend over HTTPS or buffered and retried when offline.
+3. Backend validates, aggregates, and stores events in MySQL; computes derived metrics (focus score, session durations).
+4. Dashboard queries the backend for aggregated views; WebSockets send real-time updates for rules/notifications.
+
+Security & privacy
+------------------
+- Privacy-first by design: no raw content capture (no page content, search queries, or chat transcripts).
+- Data minimization: only store aggregate or domain-level metadata; session identifiers are rotated regularly.
+- Transport security: HTTPS required for all API endpoints; WebSocket connections use wss://.
+- Access control: Dashboard API uses token-based auth with role checks (parent, learner, admin).
 
 Tech stack
 ----------
-- Frontend: Vite + React
-- Backend: FastAPI + Uvicorn
-- Database: MySQL (or compatible)
-- Optional: FAISS for semantic indexing
+- Frontend: Vite, React, modern JavaScript
+- Backend: Python, FastAPI, Uvicorn
+- Database: MySQL (relational schema; see `backend/parent_child_connections.sql`)
+- Optional: FAISS for embeddings and semantic features
+- Dev tooling: Docker, Docker Compose (for local multi-service runs)
 
-Quick start (developer)
------------------------
-Clone the repo and follow these steps to run locally.
+Deployment & hosting
+--------------------
+- Frontend: static hosting (Netlify, Vercel, S3 + CloudFront)
+- Backend: containerized (Docker) or serverless (Cloud Run, App Service); requires a managed MySQL instance
+- Live demo: https://polaristracker.netlify.app
 
+Local development (quick start)
+-----------------------------
 1) Backend (Windows example)
 
 ```bash
@@ -46,40 +104,34 @@ npm install
 npm run dev
 ```
 
-3) Chrome extension (optional)
+3) Extension (optional)
 
-1. Open `chrome://extensions` in Chrome/Edge
+1. Open `chrome://extensions`
 2. Enable Developer Mode
 3. Click "Load unpacked" and select the `extension/` folder
 
-Screenshots
------------
-Replace these placeholder images with your actual screenshots. Suggested path: `docs/screenshots/` or `frontend/public/screenshots/`.
+Project structure (top-level)
+----------------------------
 
-<!-- Centered large screenshots (replace paths with your images) -->
-<p align="center">
-   <img src="docs/screenshots/homepage.png" alt="Polaris Homepage" width="900" />
-</p>
+- `backend/` — FastAPI app, migrations, DB init scripts, and requirements
+- `frontend/` — Vite + React app and public assets
+- `extension/` — Chrome extension source (Manifest v3)
+- `docs/` — (recommended) place for screenshots, deployment notes, and diagrams
 
-<p align="center">
-   <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="900" />
-</p>
+Screenshots / Visual assets
+--------------------------
+Place image files in `docs/screenshots/` or `frontend/public/screenshots/`. This README intentionally removes inline placeholder text — add images in that path and they will render automatically.
 
-<p align="center">
-   <img src="docs/screenshots/extension.png" alt="Extension UI" width="600" />
-</p>
+Suggested filenames:
+- `docs/screenshots/homepage.png`
+- `docs/screenshots/dashboard.png`
+- `docs/screenshots/extension.png`
 
-If you want the images to display while working locally, add the files above and commit them; the markdown will render automatically on GitHub.
-
-Deployment
-----------
-- The live demo is hosted at: https://polaristracker.netlify.app
-- Frontend can be deployed to Netlify/Vercel; backend can be deployed to any container or cloud VM and configured with the production database.
-
-Contributing
-------------
-- Fork the repository and open a pull request with a clear description of changes.
-- For UI changes, include screenshots and short testing notes.
+Contributing & review notes for HR
+----------------------------------
+- Code is organized by component (backend, frontend, extension) for straightforward review.
+- Relevant files to inspect for architecture and security: `backend/app/main.py`, `backend/config/settings.py`, `extension/content/`, and `frontend/src/components/`.
+- If you want me to produce a short one-page executive summary (PDF or printable Markdown) tailored for HR, I can generate that next.
 
 License
 -------
@@ -87,6 +139,7 @@ MIT
 
 Contact
 -------
-For questions, reach out via the project maintainer contact or open an issue in this repository.
+Open an issue in this repository or reach out to the maintainer listed in `PROJECT_EXPLAINER.md`.
+
 
 
