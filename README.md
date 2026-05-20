@@ -1,137 +1,187 @@
-# Polaris Tracker — HR-ready Project Overview
+<h1 align="center">
+  <img src="https://readme-typing-svg.herokuapp.com?font=Orbitron&weight=900&size=42&duration=3000&pause=1000&color=FFFFFF&center=true&vCenter=true&width=1000&lines=POLARIS+TRACKER;AI+Powered+Productivity+Analytics+Platform;FastAPI+%7C+React+%7C+Chrome+Extension+%7C+NLP" />
+</h1>
 
-Polaris is a privacy-first activity tracker and parental-awareness dashboard designed to help families and learners understand device activity, focus patterns, and study progress. This repository contains the browser extension, backend API, and frontend dashboard used in the project.
+<p align="center">
+  <img src="https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white"/>
+  <img src="https://img.shields.io/badge/React-Frontend-20232A?style=for-the-badge&logo=react&logoColor=61DAFB"/>
+  <img src="https://img.shields.io/badge/Chrome-Extension-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white"/>
+  <img src="https://img.shields.io/badge/NLP-AI%20Engine-6A1B9A?style=for-the-badge"/>
+</p>
 
-Live demo: https://polaristracker.netlify.app
+---
 
-Table of contents
------------------
-- Project summary
-- Product features
-- Architecture & components
-- Data flow
-- Security & privacy
-- Tech stack
-- Deployment & hosting
-- Local development (quick start)
-- Project structure
-- Contributing & support
-- Screenshots (placeholders removed — add files in `docs/screenshots/`)
+# Polaris Tracker
 
-Project summary
----------------
-Polaris focuses on lightweight telemetry and clear, actionable visualizations for caregivers and learners. The system balances useful analytics (session timelines, focus scores, course progress) with privacy safeguards (no raw content logging, aggregated metrics only).
+Polaris Tracker is an AI-powered productivity analytics and monitoring platform designed to track user activity, analyze focus sessions, generate productivity insights, and provide intelligent monitoring through a browser extension and analytics dashboard.
 
-Product features (high level)
-----------------------------
-- Activity tracking: active/idle detection, focused session identification
-- Dashboard: session timelines, daily/weekly summaries, per-user reports
-- Course progress: chapter-level completion tracking and progress aggregation
-- Parental controls: domain-level policy rules and lightweight blocking
-- Real-time sync: WebSocket-based updates for rules and notifications
+The platform integrates real-time activity tracking, NLP-powered analysis, analytics visualization, and scalable backend infrastructure into a unified monitoring ecosystem.
 
-Architecture & components
--------------------------
-High-level components:
+---
 
-- Browser extension (Manifest v3): collects lightweight events and sends them to backend or buffers when offline.
-- Backend API (FastAPI): ingests events, computes metrics, persists to MySQL, exposes secure REST/WebSocket endpoints.
-- Frontend dashboard (Vite + React): visualizes activity, manages users/roles, and administers parental rules.
-- Optional FAISS index: semantic indexing for RAG features and contextual recommendations.
+## Dashboard
 
-ASCII architecture diagram
+<p align="center">
+  <img src="./screenshots/dashboard.png" width="100%" alt="Dashboard"/>
+</p>
 
+---
+
+# Core Features
+
+## Productivity Monitoring
+- Active and idle session tracking
+- Focus time analysis
+- Website usage statistics
+- Session history analytics
+- Real-time activity updates
+
+## Analytics Dashboard
+- Interactive productivity metrics
+- Daily and weekly reports
+- Timeline visualization
+- User activity insights
+- Progress monitoring
+
+<p align="center">
+  <img src="./screenshots/productivity-dashboard.png" width="100%" alt="Productivity-Dashboard"/>
+</p>
+
+## Chrome Extension
+- Browser activity collection
+- Lightweight telemetry system
+- Background monitoring
+- Real-time synchronization
+- Manifest V3 architecture
+
+## NLP Intelligence
+- Behavior pattern analysis
+- Semantic processing
+- Productivity insight generation
+- Recommendation engine
+- Intelligent analytics
+
+## Security & Privacy
+- Token-based authentication
+- Secure API communication
+- Privacy-first architecture
+- HTTPS and WebSocket security
+- Minimal telemetry collection
+
+---
+
+# System Architecture
+
+```text
+ ┌──────────────────────────┐
+ │    Chrome Extension      │
+ │ Activity Tracking Layer  │
+ └────────────┬─────────────┘
+              │
+              │ HTTPS / WSS
+              ▼
+ ┌──────────────────────────┐
+ │      FastAPI Backend     │
+ │ Authentication + APIs    │
+ │ Analytics Processing     │
+ └────────────┬─────────────┘
+              │
+      ┌───────┴────────┐
+      ▼                ▼
+ ┌───────────┐   ┌─────────────┐
+ │   MySQL   │   │ NLP Engine  │
+ │ Database  │   │ + FAISS AI  │
+ └───────────┘   └─────────────┘
+              │
+              ▼
+ ┌──────────────────────────┐
+ │     React Dashboard      │
+ │ Productivity Analytics   │
+ └──────────────────────────┘
 ```
-                  +-----------------+                +----------------+
-                  |   Browser       |  -- HTTPS -->   |  FastAPI       |
-                  |   Extension     |                |  Backend + DB  |
-                  +--------+--------+                +----+------+----+
-                               |                              |      |
-                               | WebSocket/HTTPS              |      | (optional)
-                               v                              v      v
-                        +----+-----+                  +-----+----+   +--------+
-                        | Frontend | <--- HTTPS --->  |  MySQL   |   |  FAISS |
-                        | Dashboard|                  +----------+   +--------+
-                        +----------+
+
+---
+
+# Technology Stack
+
+| Frontend | Backend | AI / NLP | Infrastructure |
+|---|---|---|---|
+| React.js | FastAPI | NLP Processing | MySQL |
+| Vite | Python | FAISS Vector Search | Redis |
+| JavaScript | Uvicorn | Semantic Analysis | Docker |
+| HTML5 | REST APIs | Recommendation Engine | Linux |
+| CSS3 | WebSockets | AI Analytics | GitHub |
+| Tailwind CSS | Authentication APIs | Data Intelligence | Postman |
+
+---
+
+# Application Flow
+
+```text
+User Activity
+      │
+      ▼
+Chrome Extension
+      │
+      ▼
+FastAPI Backend APIs
+      │
+ ┌────┴─────┐
+ ▼          ▼
+MySQL     NLP Engine
+ │          │
+ └────┬─────┘
+      ▼
+React Dashboard
+      │
+      ▼
+Analytics & Insights
 ```
 
-Data flow
----------
-1. The extension records lightweight events (timestamp, activity state, domain, session markers).
-2. Events are sent to the backend over HTTPS or buffered and retried when offline.
-3. Backend validates, aggregates, and stores events in MySQL; computes derived metrics (focus score, session durations).
-4. Dashboard queries the backend for aggregated views; WebSockets send real-time updates for rules/notifications.
+---
 
-Security & privacy
-------------------
-- Privacy-first by design: no raw content capture (no page content, search queries, or chat transcripts).
-- Data minimization: only store aggregate or domain-level metadata; session identifiers are rotated regularly.
-- Transport security: HTTPS required for all API endpoints; WebSocket connections use wss://.
-- Access control: Dashboard API uses token-based auth with role checks (parent, learner, admin).
-
-Tech stack
-----------
-- Frontend: Vite, React, modern JavaScript
-- Backend: Python, FastAPI, Uvicorn
-- Database: MySQL (relational schema; see `backend/parent_child_connections.sql`)
-- Optional: FAISS for embeddings and semantic features
-- Dev tooling: Docker, Docker Compose (for local multi-service runs)
-
-Deployment & hosting
---------------------
-- Frontend: static hosting (Netlify, Vercel, S3 + CloudFront)
-- Backend: containerized (Docker) or serverless (Cloud Run, App Service); requires a managed MySQL instance
-- Live demo: https://polaristracker.netlify.app
-
-Local development (quick start)
------------------------------
-1) Backend (Windows example)
+# Project Structure
 
 ```bash
-cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python init_db.py
-uvicorn app.main:app --reload --port 8000
+Polaris/
+│
+├── backend/
+├── frontend/
+├── extension/
+├── screenshots/
+|
+└── README.md
 ```
 
-2) Frontend
+---
+
+# Modules
+
+| Module | Description |
+|---|---|
+| Chrome Extension | User activity tracking |
+| FastAPI Backend | APIs and analytics processing |
+| NLP Engine | AI-powered insight generation |
+| React Dashboard | Productivity visualization |
+| MySQL Database | Persistent data storage |
+| WebSocket Layer | Real-time synchronization |
+
+---
+
+# Deployment
+
+| Service | Platform |
+|---|---|
+| Frontend | Netlify |
+| Backend | Render / VPS |
+| Database | MySQL |
+| APIs | FastAPI |
+| Extension | Chrome Browser |
+
+---
+
+# Repository
 
 ```bash
-cd frontend
-npm install
-npm run dev
+git clone https://github.com/Madeshmadmax7/Polaris.git
 ```
-
-3) Extension (optional)
-
-1. Open `chrome://extensions`
-2. Enable Developer Mode
-3. Click "Load unpacked" and select the `extension/` folder
-
-Project structure (top-level)
-----------------------------
-
-- `backend/` — FastAPI app, migrations, DB init scripts, and requirements
-- `frontend/` — Vite + React app and public assets
-- `extension/` — Chrome extension source (Manifest v3)
-- `docs/` — (recommended) place for screenshots, deployment notes, and diagrams
-
-
-Contributing & review notes for HR
-----------------------------------
-- Code is organized by component (backend, frontend, extension) for straightforward review.
-- Relevant files to inspect for architecture and security: `backend/app/main.py`, `backend/config/settings.py`, `extension/content/`, and `frontend/src/components/`.
-- If you want me to produce a short one-page executive summary (PDF or printable Markdown) tailored for HR, I can generate that next.
-
-License
--------
-MIT
-
-Contact
--------
-Open an issue in this repository or reach out to the maintainer listed in `PROJECT_EXPLAINER.md`.
-
-
-
