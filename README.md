@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="https://readme-typing-svg.herokuapp.com?font=Orbitron&weight=900&size=42&duration=3000&pause=1000&color=FFFFFF&center=true&vCenter=true&width=1000&lines=POLARIS+TRACKER;AI+Powered+Productivity+Analytics+Platform;FastAPI+%7C+React+%7C+Chrome+Extension+%7C+NLP" />
+  <img src="https://readme-typing-svg.herokuapp.com?font=Orbitron&weight=800&size=42&duration=3000&pause=1000&color=FFFFFF&center=true&vCenter=true&width=1000&lines=POLARIS+TRACKER;AI+Powered+Productivity+Analytics+Platform;FastAPI+%7C+React+%7C+Chrome+Extension+%7C+NLP" />
 </h1>
 
 <p align="center">
