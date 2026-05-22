@@ -28,7 +28,25 @@
 
 <br/>
 
-[Features](#features) • [Architecture](#system-architecture) • [Tech Stack](#technology-stack) • [Setup](#repository-setup)
+<p align="center">
+
+<a href="#features">
+  <img src="https://img.shields.io/badge/Features-0D1117?style=for-the-badge&logo=readthedocs&logoColor=white"/>
+</a>
+
+<a href="#system-architecture">
+  <img src="https://img.shields.io/badge/Architecture-0D1117?style=for-the-badge&logo=dependabot&logoColor=white"/>
+</a>
+
+<a href="#technology-stack">
+  <img src="https://img.shields.io/badge/Tech%20Stack-0D1117?style=for-the-badge&logo=stackshare&logoColor=white"/>
+</a>
+
+<a href="#repository-setup">
+  <img src="https://img.shields.io/badge/Setup-0D1117?style=for-the-badge&logo=rocket&logoColor=white"/>
+</a>
+
+</p>
 
 </div>
 
@@ -121,7 +139,7 @@ The analytics dashboard provides comprehensive visualization of user productivit
 
 <div align="center">
 
-<img src="./screenshots/img2.jpg" width="90%" />
+<img src="./screenshots/img2.png" width="90%" />
 
 </div>
 
