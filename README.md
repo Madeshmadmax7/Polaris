@@ -83,7 +83,7 @@ Polaris Tracker combines a Chrome Extension, FastAPI backend, NLP intelligence e
 - **Frontend:** React · Vite · Tailwind CSS
 - **Backend:** FastAPI · Python · WebSockets
 - **AI Layer:** NLP · FAISS · Semantic Analysis
-- **Database:** MySQL · Redis
+- **Database:** MySQL · FAISS
 - **Extension:** Chrome Manifest V3
 - **Infrastructure:** Docker · Linux · GitHub
 
@@ -278,7 +278,7 @@ Polaris includes intelligent progress tracking systems capable of visualizing co
 | Frontend | Backend | AI / NLP | Infrastructure |
 |:---|:---|:---|:---|
 | React.js | FastAPI | NLP Processing | MySQL |
-| Vite | Python | FAISS Vector Search | Redis |
+| Vite | Python | FAISS Vector Search | FAISS |
 | JavaScript | Uvicorn | Semantic Analysis | Docker |
 | HTML5 | REST APIs | Recommendation Engine | Linux |
 | CSS3 | WebSockets | AI Analytics | GitHub |
