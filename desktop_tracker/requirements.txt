@@ -1,0 +1,19 @@
+# LifeOS Desktop Tracker — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+pywin32>=306          # win32gui, win32process — foreground window detection
+psutil>=5.9.0         # Process name/PID lookup
+requests>=2.31.0      # HTTP client for API calls
+python-dotenv>=1.0.0  # .env file loading
+
+# GUI & System Tray
+customtkinter>=5.2.0  # Modern dark-themed Tkinter UI
+pystray>=0.19.0       # System tray icon
+Pillow>=10.0.0        # Image handling for tray/icons
+winotify>=1.1.0       # Native Windows toast notifications
+keyboard>=0.13.5      # Global system hotkeys
+
+# Build
+pyinstaller>=6.0.0    # Package into standalone .exe
+
+# Note: ctypes is built into Python — no install needed for idle detection.
