@@ -1,0 +1,1454 @@
+APPENDIX 1: SOURCE CODE
+
+=== backend/app/services/tracking_service.py (Tracking & AI Classification Logic) ===
+"""
+LifeOS – Tracking Service
+Handles activity log ingestion with privacy filtering and category resolution.
+"""
+
+from datetime import datetime, timezone
+from typing import List, Optional
+from functools import lru_cache
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.models.models import TrackingLog, DomainCategory
+from app.schemas.schemas import TrackingLogCreate
+from app.utils.privacy import sanitize_url
+
+
+# ── Default Domain Classifications ───────────────────────
+DEFAULT_CATEGORIES = {
+    # Productive
+    "github.com": "productive",
+    "stackoverflow.com": "productive",
+    "docs.python.org": "productive",
+    "developer.mozilla.org": "productive",
+    "leetcode.com": "productive",
+    "hackerrank.com": "productive",
+    "coursera.org": "productive",
+    "udemy.com": "productive",
+    "edx.org": "productive",
+    "khanacademy.org": "productive",
+    "scholar.google.com": "productive",
+    "arxiv.org": "productive",
+    "notion.so": "productive",
+    "docs.google.com": "productive",
+    "kaggle.com": "productive",
+    "replit.com": "productive",
+    "codepen.io": "productive",
+
+    # Distracting
+    "youtube.com": "distracting",
+    "reddit.com": "distracting",
+    "twitter.com": "distracting",
+    "x.com": "distracting",
+    "instagram.com": "distracting",
+    "facebook.com": "distracting",
+    "tiktok.com": "distracting",
+    "twitch.tv": "distracting",
+    "9gag.com": "distracting",
+    "buzzfeed.com": "distracting",
+    "netflix.com": "distracting",
+    "primevideo.com": "distracting",
+    "hotstar.com": "distracting",
+}
+
+
+_defaults_seeded = False
+
+def resolve_category(domain: str, db: Session, user_id: str) -> str:
+    """Resolve domain category: user override > global > default > neutral."""
+    global _defaults_seeded
+    if not _defaults_seeded:
+        try:
+            # Seed defaults as global if they don't exist
+            for pat, cat in DEFAULT_CATEGORIES.items():
+                exists = db.query(DomainCategory).filter(
+                    DomainCategory.domain_pattern == pat, 
+                    DomainCategory.is_global == True
+                ).first()
+                if not exists:
+                    db.add(DomainCategory(domain_pattern=pat, category=cat, is_global=True, user_id="system"))
+            db.commit()
+        except Exception:
+            db.rollback()
+        _defaults_seeded = True
+
+    # Check user-specific override
+    user_cat = db.query(DomainCategory).filter(
+        DomainCategory.domain_pattern == domain,
+        DomainCategory.user_id == user_id
+    ).first()
+    if user_cat:
+        return user_cat.category
+
+    # Check global classification
+    global_cat = db.query(DomainCategory).filter(
+        DomainCategory.domain_pattern == domain,
+        DomainCategory.is_global == True
+    ).first()
+    if global_cat:
+        return global_cat.category
+
+    # Check defaults
+    if domain in DEFAULT_CATEGORIES:
+        return DEFAULT_CATEGORIES[domain]
+
+    # Check partial match (e.g. "docs.python.org" matches "python.org")
+    for pattern, category in DEFAULT_CATEGORIES.items():
+        if domain.endswith(f".{pattern}") or domain == pattern:
+            return category
+
+    return "neutral"
+
+
+def ingest_tracking_log(
+    db: Session,
+    user_id: str,
+    log_data: TrackingLogCreate,
+) -> TrackingLog:
+    """Ingest a single tracking log with privacy filtering and category resolution."""
+    page_title = getattr(log_data, 'page_title', None)
+    yt_cls = getattr(log_data, 'yt_classification', None)
+
+    # ── Desktop Activity (sent by the desktop_tracker Python agent) ──────────
+    # Domain format: "desktop://Visual Studio Code"
+    # The tracker pre-classifies via yt_classification, so we skip
+    # URL sanitisation and domain-based category lookup entirely.
+    if log_data.domain.startswith("desktop://"):
+        domain = log_data.domain
+        category = yt_cls if yt_cls in ('productive', 'neutral', 'distracting') else 'neutral'
+    else:
+        # ── Web Activity (sent by the Chrome extension) ───────────────────────
+        domain = sanitize_url(f"https://{log_data.domain}")
+        if not domain:
+            domain = log_data.domain  # Fallback if already a clean hostname
+
+        category = resolve_category(domain, db, user_id)
+
+        # Smart YouTube classification — three-tier override:
+        # 1. Trust the extension's real-time classification if provided (most accurate).
+        # 2. Fall back to title keyword matching.
+        # 3. Otherwise keep domain default.
+        if domain in ('youtube.com', 'youtu.be'):
+            if yt_cls in ('productive', 'neutral', 'distracting'):
+                # Extension already classified this video — trust it directly.
+                category = yt_cls
+            elif page_title and category == 'distracting' and _is_learning_video(page_title):
+                category = 'productive'
+
+    log = TrackingLog(
+        user_id=user_id,
+        domain=domain,
+        category=category,
+        duration_seconds=log_data.duration_seconds,
+        tab_switches=log_data.tab_switches,
+        scroll_depth=log_data.scroll_depth,
+        is_active=log_data.is_active,
+        page_title=page_title,
+        timestamp=log_data.timestamp or datetime.now(timezone.utc),
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+# ── YouTube Learning Detection ────────────────────────────
+LEARNING_KEYWORDS = [
+    # General education
+    'tutorial', 'course', 'lecture', 'learn', 'how to', 'explained',
+    'walkthrough', 'study', 'education', 'class', 'lesson', 'training',
+    'guide', 'documentation', 'workshop', 'bootcamp', 'masterclass',
+    'introduction', 'intro', 'beginner', 'basics', 'fundamentals', 'overview',
+    'crash course', 'complete guide', 'full course', 'for beginners', 'step by step',
+    # Web fundamentals (titles like "Semantic HTML & Accessibility")
+    'html', 'css', 'web design', 'web development', 'web dev', 'webpage',
+    'website', 'markup', 'styling', 'responsive', 'flexbox', 'grid layout',
+    'bootstrap', 'tailwind', 'sass', 'scss', 'dom', 'semantic',
+    'accessibility', 'forms', 'tables', 'tags', 'attributes', 'selectors',
+    'w3schools', 'mdn', 'web standards',
+    # CS / Programming
+    'programming', 'coding', 'code', 'developer', 'software',
+    'javascript', 'python', 'java', 'react', 'node', 'sql', 'database',
+    'algorithm', 'data structure', 'dsa', 'leetcode', 'competitive',
+    'frontend', 'backend', 'fullstack', 'full stack', 'api', 'devops',
+    'git', 'linux', 'docker', 'kubernetes', 'cloud', 'aws', 'azure',
+    'typescript', 'c++', 'golang', 'rust', 'flutter', 'swift',
+    'machine learning', 'deep learning', 'artificial intelligence',
+    'neural network', 'nlp', 'computer vision', 'tensorflow', 'pytorch',
+    'hooks', 'context api', 'state management', 'lifecycle', 'component',
+    'express', 'mongodb', 'postgresql', 'redis', 'graphql',
+    'rest api', 'microservices', 'ci/cd', 'testing', 'debugging',
+    'object oriented', 'functional programming', 'async', 'promises',
+    'data science', 'pandas', 'numpy', 'matplotlib', 'jupyter',
+    'cybersecurity', 'networking', 'operating system', 'compiler',
+    # Science & Math
+    'physics', 'chemistry', 'biology', 'math', 'calculus', 'algebra',
+    'statistics', 'probability', 'engineering', 'science',
+    # Academic
+    'exam', 'preparation', 'gate', 'placement', 'interview prep',
+    'campus', 'semester', 'university', 'college', 'syllabus',
+]
+
+GAMING_KEYWORDS = [
+    'gameplay', 'walkthrough', 'speedrun', "let's play", 'playthrough', 'montage', 'highlights',
+    'gta', 'valorant', 'minecraft', 'roblox', 'fortnite', 'apex legends', 'warzone', 'cod', 'csgo'
+]
+
+@lru_cache(maxsize=1000)
+def _ai_classify_youtube(title: str) -> bool:
+    try:
+        from app.services.ai_service import classify_desktop_app
+        return classify_desktop_app("YouTube Video", title) == "productive"
+    except Exception:
+        return False
+
+
+def _is_learning_video(title: str) -> bool:
+    """Check if a YouTube video title indicates educational content."""
+    lower_title = title.lower()
+    
+    # Fast reject if it has gaming keywords
+    if any(keyword in lower_title for keyword in GAMING_KEYWORDS):
+        return False
+        
+    # Fast accept if it has strong learning keywords
+    if any(keyword in lower_title for keyword in LEARNING_KEYWORDS):
+        return True
+        
+    # LLM semantic fallback
+    return _ai_classify_youtube(title)
+
+
+def ingest_batch(
+    db: Session,
+    user_id: str,
+    logs: List[TrackingLogCreate],
+) -> int:
+    """Ingest a batch of tracking logs (from extension offline buffer). Returns count."""
+    count = 0
+    for log_data in logs:
+        try:
+            ingest_tracking_log(db, user_id, log_data)
+            count += 1
+        except Exception:
+            db.rollback()
+            continue
+    return count
+
+
+def get_user_logs(
+    db: Session,
+    user_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    limit: int = 100,
+) -> List[TrackingLog]:
+    """Retrieve tracking logs for a user within a date range."""
+    query = db.query(TrackingLog).filter(TrackingLog.user_id == user_id)
+    if start:
+        query = query.filter(TrackingLog.timestamp >= start)
+    if end:
+        query = query.filter(TrackingLog.timestamp <= end)
+    return query.order_by(TrackingLog.timestamp.desc()).limit(limit).all()
+
+
+def get_domain_breakdown(
+    db: Session,
+    user_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> List[dict]:
+    """Get time spent per domain, grouped and sorted."""
+    query = db.query(
+        TrackingLog.domain,
+        TrackingLog.category,
+        func.sum(TrackingLog.duration_seconds).label("total_seconds"),
+        func.count(TrackingLog.id).label("visit_count"),
+    ).filter(
+        TrackingLog.user_id == user_id,
+    ).group_by(TrackingLog.domain, TrackingLog.category)
+
+    if start:
+        query = query.filter(TrackingLog.timestamp >= start)
+    if end:
+        query = query.filter(TrackingLog.timestamp <= end)
+
+    results = query.order_by(func.sum(TrackingLog.duration_seconds).desc()).all()
+
+    # For YouTube entries, also get the most recent video title
+    domain_data = []
+    for r in results:
+        entry = {
+            "domain": r.domain,
+            "category": r.category,
+            "total_seconds": r.total_seconds,
+            "visit_count": r.visit_count,
+        }
+
+        # Get recent page titles for this domain (YouTube videos OR desktop windows)
+        is_youtube = r.domain in ('youtube.com', 'youtu.be')
+        is_desktop = r.domain.startswith('desktop://')
+
+        if is_youtube or is_desktop:
+            title_key = "videos" if is_youtube else "windows"
+            title_query = db.query(
+                TrackingLog.page_title,
+                func.sum(TrackingLog.duration_seconds).label("seconds"),
+            ).filter(
+                TrackingLog.user_id == user_id,
+                TrackingLog.domain == r.domain,
+                TrackingLog.category == r.category,
+                TrackingLog.page_title.isnot(None),
+                TrackingLog.page_title != '',
+            )
+
+            if start:
+                title_query = title_query.filter(TrackingLog.timestamp >= start)
+            if end:
+                title_query = title_query.filter(TrackingLog.timestamp <= end)
+
+            title_query_results = title_query.group_by(TrackingLog.page_title).order_by(
+                func.sum(TrackingLog.duration_seconds).desc()
+            ).limit(5).all()
+
+            entry[title_key] = [
+                {"title": t.page_title, "seconds": t.seconds}
+                for t in title_query_results
+            ]
+
+        domain_data.append(entry)
+
+    return domain_data
+
+
+
+=== backend/app/services/gamification_service.py (Scoring & Gamification Logic) ===
+from datetime import datetime, timezone
+from typing import List, Dict, Any
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.models.models import (
+    SkillNode, SkillSubtopic, Achievement, UserAchievement, DailyQuest,
+    TrackingLog, ChapterProgress, User, StudyPlan
+)
+
+# Hardcoded achievements config
+DEFAULT_ACHIEVEMENTS = [
+    {
+        "id": "deep_work_demon",
+        "name": "Deep Work Demon",
+        "description": "Log 4 continuous hours of productive desktop time without distractions.",
+        "icon": "Zap",
+        "color": "#eab308",
+        "xp_reward": 100,
+        "criteria_type": "productive_hours",
+        "criteria_value": 4
+    },
+    {
+        "id": "consistency_king",
+        "name": "Consistency King",
+        "description": "Complete at least one study plan chapter 7 days in a row.",
+        "icon": "Coffee",
+        "color": "#3b82f6",
+        "xp_reward": 150,
+        "criteria_type": "streak_days",
+        "criteria_value": 7
+    },
+    {
+        "id": "polyglot",
+        "name": "Polyglot",
+        "description": "Master nodes in 3 completely different categories.",
+        "icon": "Globe",
+        "color": "#10b981",
+        "xp_reward": 200,
+        "criteria_type": "mastered_skills",
+        "criteria_value": 3
+    }
+]
+
+# Legacy JS config translated to Python for DB seeding
+SKILL_TREE_SEED = [
+    {
+        "id": 'html-css', "name": 'HTML & CSS', "description": 'The foundation of the web — structure and styling.',
+        "lucideIcon": 'Code', "color": '#e34c26', "tier": 1, "prerequisites": [], "connections": ['javascript'],
+        "subtopics": [
+            {"name": 'HTML Basics', "keywords": ['html basics', 'html fundamentals', 'html tags']},
+            {"name": 'CSS Styling', "keywords": ['css styling', 'css basics', 'css fundamentals']},
+            {"name": 'Responsive Design', "keywords": ['responsive', 'media queries', 'flexbox', 'css grid']},
+            {"name": 'Semantic HTML', "keywords": ['semantic html', 'accessibility', 'web standards']},
+        ]
+    },
+    {
+        "id": 'mathematics', "name": 'Mathematics', "description": 'Algebra, calculus, discrete math, and logic.',
+        "lucideIcon": 'Calculator', "color": '#6366f1', "tier": 1, "prerequisites": [], "connections": ['python', 'data-structures'],
+        "subtopics": [
+            {"name": 'Linear Algebra', "keywords": ['linear algebra', 'matrices', 'vectors']},
+            {"name": 'Calculus', "keywords": ['calculus', 'derivatives', 'integrals']},
+            {"name": 'Discrete Math', "keywords": ['discrete math', 'combinatorics', 'graph theory']},
+            {"name": 'Probability & Statistics', "keywords": ['probability', 'statistics', 'stat ']},
+        ]
+    },
+    {
+        "id": 'c-lang', "name": 'C Language', "description": 'Low-level programming — pointers, memory, and systems.',
+        "lucideIcon": 'Cpu', "color": '#555555', "tier": 1, "prerequisites": [], "connections": ['java', 'data-structures'],
+        "subtopics": [
+            {"name": 'C Basics', "keywords": ['c programming', 'c language', 'c basics']},
+            {"name": 'Pointers & Memory', "keywords": ['pointers', 'memory management', 'malloc']},
+            {"name": 'File I/O', "keywords": ['file handling in c', 'c file']},
+        ]
+    },
+    {
+        "id": 'javascript', "name": 'JavaScript', "description": 'The language of the web — dynamic, versatile, everywhere.',
+        "lucideIcon": 'Braces', "color": '#f7df1e', "tier": 2, "prerequisites": ['html-css'], "connections": ['react', 'nodejs', 'typescript'],
+        "subtopics": [
+            {"name": 'JS Fundamentals', "keywords": ['javascript fundamentals', 'javascript basics', 'js basics']},
+            {"name": 'DOM Manipulation', "keywords": ['dom manipulation', 'dom scripting']},
+            {"name": 'Async & Promises', "keywords": ['async', 'promises', 'callbacks', 'event loop']},
+            {"name": 'ES6+ Features', "keywords": ['es6', 'ecmascript', 'modern javascript', 'arrow functions']},
+        ]
+    },
+    {
+        "id": 'python', "name": 'Python', "description": 'Elegant, readable, powerful — from scripting to AI.',
+        "lucideIcon": 'Terminal', "color": '#3776ab', "tier": 2, "prerequisites": [], "connections": ['django', 'flask', 'machine-learning'],
+        "subtopics": [
+            {"name": 'Python Basics', "keywords": ['python basics', 'python fundamentals', 'learn python']},
+            {"name": 'OOP in Python', "keywords": ['python oop', 'object oriented python', 'classes in python']},
+            {"name": 'Python Libraries', "keywords": ['numpy', 'pandas', 'matplotlib', 'python libraries']},
+            {"name": 'File Handling & APIs', "keywords": ['python file', 'python api', 'requests library']},
+        ]
+    },
+    {
+        "id": 'java', "name": 'Java', "description": 'Enterprise-grade, object-oriented, battle-tested.',
+        "lucideIcon": 'Coffee', "color": '#007396', "tier": 2, "prerequisites": [], "connections": ['springboot', 'data-structures'],
+        "subtopics": [
+            {"name": 'Java Basics', "keywords": ['java basics', 'java fundamentals', 'core java']},
+            {"name": 'OOP in Java', "keywords": ['java oop', 'inheritance java', 'polymorphism java']},
+            {"name": 'Collections Framework', "keywords": ['java collections', 'arraylist', 'hashmap java']},
+            {"name": 'Multithreading', "keywords": ['java multithreading', 'concurrency java', 'threads java']},
+        ]
+    },
+    {
+        "id": 'react', "name": 'React', "description": 'Build dynamic UIs with component-based architecture.',
+        "lucideIcon": 'Atom', "color": '#61dafb', "tier": 3, "prerequisites": ['javascript'], "connections": ['nextjs'],
+        "subtopics": [
+            {"name": 'React Fundamentals', "keywords": ['react fundamentals', 'react basics', 'learn react']},
+            {"name": 'Hooks & State', "keywords": ['react hooks', 'usestate', 'useeffect', 'react state']},
+            {"name": 'React Router', "keywords": ['react router', 'routing react']},
+            {"name": 'Context & Redux', "keywords": ['react context', 'redux', 'state management']},
+        ]
+    },
+    {
+        "id": 'nodejs', "name": 'Node.js', "description": 'Server-side JavaScript — APIs, microservices, and more.',
+        "lucideIcon": 'Server', "color": '#339933', "tier": 3, "prerequisites": ['javascript'], "connections": ['nextjs', 'databases'],
+        "subtopics": [
+            {"name": 'Node Basics', "keywords": ['node basics', 'nodejs basics', 'node.js fundamentals']},
+            {"name": 'Express.js', "keywords": ['express.js', 'expressjs', 'express framework']},
+            {"name": 'REST APIs', "keywords": ['rest api', 'api development', 'restful']},
+            {"name": 'Authentication', "keywords": ['authentication node', 'jwt', 'passport.js', 'oauth']},
+        ]
+    },
+    {
+        "id": 'typescript', "name": 'TypeScript', "description": 'Type-safe JavaScript for large-scale applications.',
+        "lucideIcon": 'FileType', "color": '#3178c6', "tier": 3, "prerequisites": ['javascript'], "connections": ['nextjs'],
+        "subtopics": [
+            {"name": 'TS Basics', "keywords": ['typescript basics', 'typescript fundamentals']},
+            {"name": 'Types & Interfaces', "keywords": ['typescript types', 'interfaces typescript', 'generics typescript']},
+            {"name": 'TS with React', "keywords": ['typescript react', 'react typescript']},
+        ]
+    },
+    {
+        "id": 'springboot', "name": 'Spring Boot', "description": 'Enterprise Java framework for production-grade APIs.',
+        "lucideIcon": 'Leaf', "color": '#6db33f', "tier": 3, "prerequisites": ['java'], "connections": ['databases', 'devops'],
+        "subtopics": [
+            {"name": 'Spring Basics', "keywords": ['spring basics', 'spring boot basics', 'spring fundamentals', 'mastering spring boot', 'spring boot']},
+            {"name": 'Spring MVC', "keywords": ['spring mvc', 'spring web', 'spring controller']},
+            {"name": 'Spring Data JPA', "keywords": ['spring data', 'jpa', 'spring hibernate']},
+            {"name": 'Spring Security', "keywords": ['spring security', 'spring auth']},
+        ]
+    },
+    {
+        "id": 'django', "name": 'Django', "description": 'High-level Python web framework — batteries included.',
+        "lucideIcon": 'Globe', "color": '#092e20', "tier": 3, "prerequisites": ['python'], "connections": ['databases', 'devops'],
+        "subtopics": [
+            {"name": 'Django Basics', "keywords": ['django basics', 'django fundamentals', 'learn django']},
+            {"name": 'Django Models', "keywords": ['django models', 'django orm', 'django database']},
+            {"name": 'Django REST', "keywords": ['django rest', 'drf', 'django api']},
+        ]
+    },
+    {
+        "id": 'flask', "name": 'Flask', "description": 'Lightweight Python micro-framework for web apps.',
+        "lucideIcon": 'Beaker', "color": '#888888', "tier": 3, "prerequisites": ['python'], "connections": ['databases'],
+        "subtopics": [
+            {"name": 'Flask Basics', "keywords": ['flask basics', 'flask fundamentals', 'learn flask']},
+            {"name": 'Flask REST APIs', "keywords": ['flask api', 'flask rest', 'flask route']},
+        ]
+    },
+    {
+        "id": 'data-structures', "name": 'DSA', "description": 'Arrays, trees, graphs, hash maps — the building blocks.',
+        "lucideIcon": 'Network', "color": '#f97316', "tier": 3, "prerequisites": [], "connections": ['algorithms'],
+        "subtopics": [
+            {"name": 'Arrays & Strings', "keywords": ['arrays', 'strings', 'two pointer', 'sliding window']},
+            {"name": 'Linked Lists', "keywords": ['linked list', 'doubly linked', 'circular linked']},
+            {"name": 'Stacks & Queues', "keywords": ['stack', 'queue', 'deque']},
+            {"name": 'Trees & BST', "keywords": ['binary tree', 'binary search tree', 'bst', 'tree traversal']},
+            {"name": 'Graphs', "keywords": ['graph', 'bfs', 'dfs', 'adjacency']},
+            {"name": 'Hash Maps & Sets', "keywords": ['hash map', 'hash table', 'hash set', 'hashing']},
+            {"name": 'Heaps', "keywords": ['heap', 'priority queue', 'min heap', 'max heap']},
+        ]
+    },
+    {
+        "id": 'nextjs', "name": 'Next.js', "description": 'Full-stack React framework with SSR and API routes.',
+        "lucideIcon": 'Layers', "color": '#ffffff', "tier": 4, "prerequisites": ['react', 'nodejs'], "connections": ['devops'],
+        "subtopics": [
+            {"name": 'Next.js Basics', "keywords": ['next.js basics', 'nextjs basics', 'learn nextjs']},
+            {"name": 'SSR & SSG', "keywords": ['server side rendering', 'static generation', 'ssr', 'ssg']},
+            {"name": 'API Routes', "keywords": ['nextjs api', 'api routes next']},
+        ]
+    },
+    {
+        "id": 'databases', "name": 'Databases', "description": 'SQL, NoSQL, Redis — persist and query data efficiently.',
+        "lucideIcon": 'Database', "color": '#336791', "tier": 4, "prerequisites": [], "connections": ['system-design'],
+        "subtopics": [
+            {"name": 'SQL Fundamentals', "keywords": ['sql basics', 'sql fundamentals', 'learn sql']},
+            {"name": 'PostgreSQL / MySQL', "keywords": ['postgresql', 'mysql', 'postgres']},
+            {"name": 'MongoDB / NoSQL', "keywords": ['mongodb', 'nosql', 'document database']},
+            {"name": 'Redis & Caching', "keywords": ['redis', 'caching', 'in-memory']},
+        ]
+    },
+    {
+        "id": 'algorithms', "name": 'Algorithms', "description": 'Sorting, searching, DP, graph algorithms — interview ready.',
+        "lucideIcon": 'GitBranch', "color": '#ec4899', "tier": 4, "prerequisites": ['data-structures'], "connections": ['system-design'],
+        "subtopics": [
+            {"name": 'Sorting & Searching', "keywords": ['sorting', 'searching', 'binary search', 'merge sort']},
+            {"name": 'Dynamic Programming', "keywords": ['dynamic programming', 'dp ', 'memoization', 'tabulation']},
+            {"name": 'Greedy Algorithms', "keywords": ['greedy', 'greedy algorithm']},
+            {"name": 'Backtracking', "keywords": ['backtracking', 'recursion', 'n-queens']},
+            {"name": 'Graph Algorithms', "keywords": ['dijkstra', 'shortest path', 'topological sort', 'graph algorithm']},
+            {"name": 'Bit Manipulation', "keywords": ['bit manipulation', 'bitwise', 'xor']},
+        ]
+    },
+    {
+        "id": 'machine-learning', "name": 'ML / AI', "description": 'Neural networks, deep learning, and AI fundamentals.',
+        "lucideIcon": 'Brain', "color": '#a855f7', "tier": 4, "prerequisites": ['python'], "connections": ['system-design'],
+        "subtopics": [
+            {"name": 'ML Basics', "keywords": ['machine learning basics', 'machine learning fundamentals', 'supervised learning', 'intro to ml']},
+            {"name": 'Deep Learning', "keywords": ['deep learning', 'neural network', 'cnn', 'rnn']},
+            {"name": 'NLP', "keywords": ['natural language', 'nlp', 'text processing']},
+            {"name": 'TensorFlow / PyTorch', "keywords": ['tensorflow', 'pytorch', 'keras']},
+        ]
+    },
+    {
+        "id": 'git-vcs', "name": 'Git & VCS', "description": 'Version control, branching, collaboration workflows.',
+        "lucideIcon": 'GitMerge', "color": '#f05032', "tier": 4, "prerequisites": [], "connections": ['devops'],
+        "subtopics": [
+            {"name": 'Git Basics', "keywords": ['git basics', 'git fundamentals', 'learn git', 'version control basics']},
+            {"name": 'Branching & Merging', "keywords": ['git branch', 'git merge', 'git rebase']},
+            {"name": 'GitHub / GitLab', "keywords": ['github', 'gitlab', 'pull request', 'code review']},
+        ]
+    },
+    {
+        "id": 'devops', "name": 'DevOps & Cloud', "description": 'Docker, CI/CD, AWS/GCP — deploy and scale applications.',
+        "lucideIcon": 'Cloud', "color": '#06b6d4', "tier": 5, "prerequisites": [], "connections": ['system-design'],
+        "subtopics": [
+            {"name": 'Docker', "keywords": ['docker', 'containerization', 'dockerfile']},
+            {"name": 'CI/CD', "keywords": ['ci/cd', 'continuous integration', 'github actions', 'jenkins']},
+            {"name": 'AWS / Cloud', "keywords": ['aws', 'amazon web services', 'cloud computing', 'gcp', 'azure']},
+            {"name": 'Kubernetes', "keywords": ['kubernetes', 'k8s', 'container orchestration']},
+        ]
+    },
+    {
+        "id": 'system-design', "name": 'System Design', "description": 'Architect scalable, distributed systems like the pros.',
+        "lucideIcon": 'Blocks', "color": '#f59e0b', "tier": 5, "prerequisites": ['databases', 'algorithms'], "connections": [],
+        "subtopics": [
+            {"name": 'Design Principles', "keywords": ['system design basics', 'design principles', 'scalability']},
+            {"name": 'Load Balancing', "keywords": ['load balancing', 'horizontal scaling']},
+            {"name": 'Microservices', "keywords": ['microservices', 'distributed systems', 'service oriented']},
+            {"name": 'Caching & CDN', "keywords": ['caching strategy', 'cdn', 'content delivery']},
+        ]
+    }
+]
+
+
+def seed_gamification_db(db: Session):
+    """Seed the database with default achievements and skill nodes if they don't exist."""
+    try:
+        # 1. Seed Achievements
+        for ach in DEFAULT_ACHIEVEMENTS:
+            if not db.query(Achievement).filter(Achievement.id == ach["id"]).first():
+                db.add(Achievement(**ach))
+                
+        # 2. Seed Skill Nodes
+        for node in SKILL_TREE_SEED:
+            existing = db.query(SkillNode).filter(SkillNode.id == node["id"]).first()
+            if not existing:
+                sn = SkillNode(
+                    id=node["id"],
+                    name=node["name"],
+                    description=node["description"],
+                    lucide_icon=node["lucideIcon"],
+                    color=node["color"],
+                    tier=node["tier"],
+                    prerequisites=node["prerequisites"],
+                    connections=node["connections"]
+                )
+                db.add(sn)
+                for sub in node["subtopics"]:
+                    db.add(SkillSubtopic(
+                        node_id=node["id"],
+                        name=sub["name"],
+                        keywords=sub["keywords"]
+                    ))
+        db.commit()
+    except Exception as e:
+        print(f"[Gamification Seed] Error: {e}")
+        db.rollback()
+
+
+def get_skill_tree_with_progress(db: Session, user_id: str) -> List[Dict[str, Any]]:
+    """Returns the skill tree exactly as expected by SkillTree.jsx."""
+    nodes = db.query(SkillNode).all()
+    result = []
+    for n in nodes:
+        node_dict = {
+            "id": n.id,
+            "name": n.name,
+            "description": n.description,
+            "lucideIcon": n.lucide_icon,
+            "color": n.color,
+            "tier": n.tier,
+            "prerequisites": n.prerequisites,
+            "connections": n.connections,
+            "subtopics": []
+        }
+        for sub in n.subtopics:
+            node_dict["subtopics"].append({
+                "name": sub.name,
+                "keywords": sub.keywords
+            })
+        result.append(node_dict)
+    return result
+
+def get_user_badges(db: Session, user_id: str) -> List[Dict[str, Any]]:
+    user_achs = db.query(UserAchievement).filter(UserAchievement.user_id == user_id).all()
+    unlocked_ids = {ua.achievement_id for ua in user_achs}
+    
+    all_achs = db.query(Achievement).all()
+    result = []
+    for a in all_achs:
+        result.append({
+            "id": a.id,
+            "name": a.name,
+            "description": a.description,
+            "icon": a.icon,
+            "color": a.color,
+            "xp_reward": a.xp_reward,
+            "unlocked": a.id in unlocked_ids
+        })
+    return result
+
+def generate_daily_quests(db: Session, user_id: str) -> List[Dict[str, Any]]:
+    """Generate 3 daily quests if they don't exist for today."""
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    quests = db.query(DailyQuest).filter(DailyQuest.user_id == user_id, DailyQuest.date == today).all()
+    
+    if not quests:
+        q1 = DailyQuest(user_id=user_id, date=today, quest_type="productive_time", title="Log 2h of Productive Time", target_value=7200, xp_reward=30)
+        q2 = DailyQuest(user_id=user_id, date=today, quest_type="limit_distraction", title="Keep Distractions Under 30m", target_value=1800, current_value=0, xp_reward=20)
+        q3 = DailyQuest(user_id=user_id, date=today, quest_type="watch_chapters", title="Complete 2 Learning Chapters", target_value=2, xp_reward=40)
+        db.add_all([q1, q2, q3])
+        db.commit()
+        quests = [q1, q2, q3]
+        
+    return [{
+        "id": q.id,
+        "title": q.title,
+        "target_value": q.target_value,
+        "current_value": q.current_value,
+        "is_completed": q.is_completed,
+        "xp_reward": q.xp_reward
+    } for q in quests]
+
+
+=== desktop_tracker/blocker.py (Desktop Blocking Logic) ===
+"""
+LifeOS Desktop Agent — App Blocker
+Terminates blocked/distracting applications and shows a Windows toast notification.
+
+Blocking sources:
+  1. Parental blocked list (synced from backend)
+  2. Focus mode: auto-block all apps classified as 'distracting'
+
+Uses psutil to kill processes and winotify for native Windows toasts.
+"""
+
+import logging
+import threading
+import time
+from typing import Optional
+
+import psutil
+from winotify import Notification, audio
+
+from classifier import DISTRACTING_APPS
+from block_overlay import show_block_overlay
+
+logger = logging.getLogger(__name__)
+
+# How often to re-fetch the blocked list from backend (seconds)
+BLOCKED_LIST_REFRESH_INTERVAL = 60
+
+
+class AppBlocker:
+    """
+    Monitors and blocks restricted desktop applications.
+
+    Usage:
+        blocker = AppBlocker(api_client=client)
+        blocker.start_sync()          # Start background sync of blocked list
+        blocker.check_and_block(snap)  # Called each poll cycle from tracker
+    """
+
+    def __init__(self, api_client=None):
+        self._api_client = api_client
+        self._blocked_apps: set[str] = set()   # e.g. {"valorant.exe", "discord.exe"}
+        self._focus_mode: bool = False
+        self._distraction_blocker_enabled: bool = True  # Distraction blocker active by default
+        self._sync_thread: Optional[threading.Thread] = None
+        self._running = True
+
+        # Track recently blocked to avoid spamming notifications
+        self._recently_blocked: dict[str, float] = {}
+        self._cooldown_seconds = 30  # Don't re-notify for same app within 30s
+
+    # ── Public API ───────────────────────────────────────────
+
+    @property
+    def focus_mode(self) -> bool:
+        return self._focus_mode
+
+    @focus_mode.setter
+    def focus_mode(self, enabled: bool):
+        self._focus_mode = enabled
+        logger.info("Focus mode %s", "ENABLED" if enabled else "DISABLED")
+
+    @property
+    def distraction_blocker_enabled(self) -> bool:
+        return self._distraction_blocker_enabled
+
+    @distraction_blocker_enabled.setter
+    def distraction_blocker_enabled(self, enabled: bool):
+        self._distraction_blocker_enabled = enabled
+        logger.info("Distraction blocker %s", "ENABLED" if enabled else "DISABLED")
+
+    @property
+    def blocked_count(self) -> int:
+        return len(self._blocked_apps)
+
+    def add_blocked_app(self, exe_name: str):
+        """Manually add an app to the local blocked list."""
+        if exe_name and exe_name.strip():
+            name = exe_name.strip().lower()
+            if not name.endswith(".exe"):
+                name += ".exe"
+            self._blocked_apps.add(name)
+            logger.info("Added to blocklist: %s", name)
+
+    def remove_blocked_app(self, exe_name: str):
+        """Remove an app from the local blocked list."""
+        name = exe_name.strip().lower()
+        self._blocked_apps.discard(name)
+        if not name.endswith(".exe"):
+            self._blocked_apps.discard(name + ".exe")
+        logger.info("Removed from blocklist: %s", name)
+
+    def get_blocked_list(self) -> list[str]:
+        """Return the current blocked app list."""
+        return sorted(self._blocked_apps)
+
+    def check_and_block(self, exe_name: str, app_name: str, category: str, pid: int) -> bool:
+        """
+        Check if the given app should be blocked. If so, kill it and notify.
+
+        Args:
+            exe_name:  Raw process name, e.g. "valorant.exe"
+            app_name:  Friendly name, e.g. "Valorant"
+            category:  Classification: "productive" | "distracting" | "neutral"
+            pid:       Process ID
+
+        Returns:
+            True if the app was blocked (killed), False otherwise.
+        """
+        normalized = exe_name.strip().lower()
+
+        should_block = False
+        reason = ""
+
+        # Check 1: Is the app in the explicit blocked list?
+        if normalized in self._blocked_apps or exe_name.lower() in self._blocked_apps:
+            should_block = True
+            reason = f"{app_name} is in your blocked applications list."
+
+        # Check 2: Distraction blocker or Focus mode — block all distracting apps
+        elif (self._focus_mode or self._distraction_blocker_enabled) and (category == "distracting" or normalized in DISTRACTING_APPS):
+            should_block = True
+            reason = f"{app_name} is classified as distracting and has been blocked."
+
+        if not should_block:
+            return False
+
+        # Cooldown check — don't spam notifications
+        now = time.time()
+        last_blocked = self._recently_blocked.get(normalized, 0)
+        if now - last_blocked < self._cooldown_seconds:
+            # Still kill it, but don't show notification again
+            self._kill_process(pid, app_name)
+            return True
+
+        self._recently_blocked[normalized] = now
+
+        # Show fullscreen block overlay (like Chrome extension)
+        show_block_overlay(app_name, reason, auto_dismiss_seconds=5)
+
+        # Kill the process
+        self._kill_process(pid, app_name)
+
+        # Show Windows toast notification
+        self._show_block_notification(app_name, reason)
+
+        logger.info("BLOCKED: %s (PID %d) — %s", app_name, pid, reason)
+        return True
+
+    # ── Background Sync ──────────────────────────────────────
+
+    def start_sync(self):
+        """Start background thread to periodically sync blocked list from backend."""
+        self._running = True
+        self._sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
+        self._sync_thread.start()
+        logger.info("App blocker sync started.")
+
+    def stop_sync(self):
+        """Stop the background sync thread."""
+        self._running = False
+
+    def _sync_loop(self):
+        """Periodically fetch the blocked app list from the backend."""
+        while self._running:
+            try:
+                self._fetch_blocked_list()
+            except Exception as e:
+                logger.error("Failed to sync blocked list: %s", e)
+            time.sleep(BLOCKED_LIST_REFRESH_INTERVAL)
+
+    def _fetch_blocked_list(self):
+        """Fetch blocked apps/sites from the backend API."""
+        if not self._api_client:
+            return
+
+        try:
+            blocked, focus_mode = self._api_client.get_blocked_apps()
+            self._focus_mode = focus_mode
+            if blocked is not None:
+                # Merge with any locally-added blocks
+                for app in blocked:
+                    self._blocked_apps.add(app.strip().lower())
+                logger.debug("Synced %d blocked apps from backend.", len(blocked))
+        except Exception as e:
+            logger.debug("Blocked list sync error: %s", e)
+
+    # ── Process Killing ──────────────────────────────────────
+
+    @staticmethod
+    def _kill_process(pid: int, app_name: str):
+        """Forcefully terminate a process by PID."""
+        try:
+            proc = psutil.Process(pid)
+            proc.kill()
+            logger.info("Killed process: %s (PID %d)", app_name, pid)
+        except psutil.NoSuchProcess:
+            pass  # Already gone
+        except psutil.AccessDenied:
+            logger.warning("Access denied killing %s (PID %d). Run as admin.", app_name, pid)
+        except Exception as e:
+            logger.error("Error killing %s: %s", app_name, e)
+
+    # ── Windows Toast Notification ───────────────────────────
+
+    @staticmethod
+    def _show_block_notification(app_name: str, reason: str):
+        """Show a native Windows toast notification."""
+        try:
+            toast = Notification(
+                app_id="LifeOS Desktop Agent",
+                title=f"🚫 {app_name} Blocked",
+                msg=reason,
+                duration="short",
+            )
+            toast.set_audio(audio.Default, loop=False)
+            toast.show()
+        except Exception as e:
+            logger.debug("Toast notification failed: %s", e)
+
+
+=== frontend/src/App.jsx (React Frontend Component) ===
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react';
+import { Menu, X, LogOut, LayoutDashboard, Zap, BookOpen, Settings, UserCircle, Shield, ChevronDown, GitBranch, BarChart3, Loader2 } from 'lucide-react';
+import { getUser, clearToken, auth as authApi, setToken, setUser as storeUser } from './api';
+
+// Notifications
+import NotificationBell from './components/NotificationBell';
+
+// Focus Widget removed from web app — lives in the browser extension now
+
+// Gamification
+import { XPProvider } from './gamification/context/XPContext';
+import XPBar from './gamification/components/XPBar';
+
+// Lazy-loaded gamification pages
+const SkillTreePage = lazy(() => import('./pages/SkillTree'));
+const AnalyticsPage = lazy(() => import('./pages/Analytics'));
+const LabPage = lazy(() => import('./pages/LabPage'));
+
+// Pages
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+import DashboardPage from './pages/DashboardPage';
+import ProductivityPage from './pages/ProductivityPage';
+import LearningPage from './pages/LearningPage';
+import QuizPage from './pages/QuizPage';
+import ParentalPage from './pages/ParentalPage';
+import ParentalStatusPage from './pages/ParentalStatusPage';
+import ParentalConnectionsPage from './pages/ParentalConnectionsPage';
+import ParentalCourseGeneratorPage from './pages/ParentalCourseGeneratorPage';
+import SettingsPage from './pages/SettingsPage';
+import NotificationsPage from './pages/NotificationsPage';
+import LandingPage from './pages/LandingPage';
+import FeaturesPage from './pages/FeaturesPage';
+import DocsPage from './pages/DocsPage';
+import { ManifestoPage, PrivacyPage, LogsPage, OptimizationPage, SecurityPage } from './pages/StaticPages';
+
+// ── Auth Context ────────────────────────────────────────
+const AuthContext = createContext(null);
+
+export function useAuth() {
+    return useContext(AuthContext);
+}
+
+function AuthProvider({ children }) {
+    const [user, setUserState] = useState(() => getUser());
+    const [loading, setLoading] = useState(false);
+
+    const login = async (email, password) => {
+        const res = await authApi.login({ email, password });
+        setToken(res.access_token);
+        storeUser(res.user);
+        setUserState(res.user);
+        return res;
+    };
+
+    const register = async (data) => {
+        const res = await authApi.register(data);
+        setToken(res.access_token);
+        storeUser(res.user);
+        setUserState(res.user);
+        return res;
+    };
+
+    const logout = () => {
+        clearToken();
+        setUserState(null);
+    };
+
+    return (
+        <AuthContext.Provider value={{ user, login, register, logout, loading }}>
+            {children}
+        </AuthContext.Provider>
+    );
+}
+
+// ── Protected Route ─────────────────────────────────────
+function ProtectedRoute({ children }) {
+    const { user } = useAuth();
+    if (!user) return <Navigate to="/login" replace />;
+    return children;
+}
+
+// ── Navbar ─────────────────────────────────────────────
+function Navbar() {
+    const { user, logout } = useAuth();
+    const [isOpen, setIsOpen] = useState(false);
+    const navigate = useNavigate();
+
+    const navItems = user ? (user.role === 'parent' ? [
+        { to: '/dashboard', label: 'Overview' },
+        { to: '/parental/status', label: 'Child Status' },
+        { to: '/parental/connections', label: 'Connections' },
+        { to: '/parental/courses', label: 'Course Generator' },
+        { to: '/settings', label: 'Settings' },
+    ] : [
+        { to: '/dashboard', label: 'Dashboard' },
+        { to: '/productivity', label: 'Productivity' },
+        { to: '/learning', label: 'Learning' },
+        // { to: '/quiz', label: 'Quizzes' },
+        { to: '/skill-tree', label: 'Skills' },
+        // { to: '/analytics', label: 'Analytics' },
+        { to: '/settings', label: 'Settings' },
+    ]) : [
+        { to: '/', label: 'Home' },
+        { to: '/features', label: 'Features' },
+        { to: '/docs', label: 'Get Started' },
+    ];
+
+    // Lab is accessible only through the Learning page chapter links (no nav entry)
+
+    return (
+        <nav className="fixed top-0 left-0 right-0 bg-black/80 backdrop-blur-xl text-white z-[100] border-b border-white/5 font-outfit" style={{ overflow: 'hidden' }}>
+            <div style={{ width: '100%', maxWidth: '100vw', padding: '0 16px', boxSizing: 'border-box' }}>
+                <div style={{ display: 'flex', alignItems: 'center', height: '56px', gap: '0' }}>
+                    <div style={{ flexShrink: 0, marginRight: '16px' }}>
+                        <Link to="/" style={{ textDecoration: 'none' }}>
+                            <span className="text-[15px] font-bold tracking-[0.4em] text-white uppercase" style={{ whiteSpace: 'nowrap' }}>
+                                Polaris
+                            </span>
+                        </Link>
+                    </div>
+
+                    <div className="hidden md:flex" style={{ flex: 1, justifyContent: 'center', alignItems: 'center', gap: '2px', overflow: 'hidden', minWidth: 0 }}>
+                        {navItems.map((item) => (
+                            <NavLink
+                                key={item.to}
+                                to={item.to}
+                                className={({ isActive }) =>
+                                    `text-[10px] font-semibold uppercase tracking-[0.12em] transition-all ${isActive ? 'bg-white text-black' : 'text-zinc-500 hover:text-white'}`
+                                }
+                                style={{ padding: '6px 10px', borderRadius: '20px', whiteSpace: 'nowrap', textDecoration: 'none' }}
+                            >
+                                {item.label}
+                            </NavLink>
+                        ))}
+                    </div>
+
+                    {user ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0, marginLeft: '12px' }}>
+                            <NotificationBell />
+                            <div style={{ maxWidth: '200px' }}>
+                                <XPBar />
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
+                                <span className="text-[11px] font-medium text-white" style={{ whiteSpace: 'nowrap' }}>{user.username}</span>
+                                <span className="text-[8px] text-zinc-600 uppercase tracking-widest leading-none" style={{ marginTop: '2px' }}>{user.role}</span>
+                            </div>
+                            <button
+                                onClick={() => { logout(); navigate('/'); }}
+                                className="rounded-lg bg-white/5 border border-white/10 text-zinc-500 hover:bg-white hover:text-black transition-all"
+                                title="Sign Out"
+                                style={{ padding: '6px', flexShrink: 0 }}
+                            >
+                                <LogOut size={14} />
+                            </button>
+                        </div>
+                    )
+                     : (
+                        <div className="hidden md:flex" style={{ alignItems: 'center', gap: '12px', flexShrink: 0, marginLeft: '12px' }}>
+                            <Link to="/login" className="text-[11px] font-medium uppercase tracking-[0.15em] text-zinc-500 hover:text-white transition-colors" style={{ textDecoration: 'none', whiteSpace: 'nowrap' }}>Sign In</Link>
+                            <Link to="/register" className="bg-white text-black text-[11px] font-bold uppercase tracking-[0.15em] hover:opacity-90 transition-all" style={{ padding: '6px 16px', borderRadius: '20px', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                                Register
+                            </Link>
+                        </div>
+                    )}
+
+                    {/* Mobile menu button */}
+                    <div className="md:hidden" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+                        <button onClick={() => setIsOpen(!isOpen)} className="p-2 text-white hover:bg-white/5 rounded-xl transition-all">
+                            {isOpen ? <X size={22} /> : <Menu size={22} />}
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Mobile Menu */}
+            {isOpen && (
+                <div className="md:hidden bg-black border-t border-white/5 py-6 px-4 space-y-3 animate-in">
+                    {navItems.map((item) => (
+                        <NavLink
+                            key={item.to}
+                            to={item.to}
+                            onClick={() => setIsOpen(false)}
+                            className={({ isActive }) =>
+                                `block px-6 py-3 text-[11px] font-semibold uppercase tracking-[0.15em] rounded-full transition-all ${isActive ? 'bg-white text-black' : 'bg-white/5 text-zinc-500 hover:text-white'}`
+                            }
+                        >
+                            {item.label}
+                        </NavLink>
+                    ))}
+                    {!user && (
+                        <Link
+                            to="/login"
+                            onClick={() => setIsOpen(false)}
+                            className="block px-6 py-3 text-[11px] font-bold uppercase tracking-[0.15em] text-center bg-white text-black rounded-full"
+                        >
+                            Authorize session
+                        </Link>
+                    )}
+                    {user && (
+                        <button
+                            onClick={() => { logout(); navigate('/'); setIsOpen(false); }}
+                            className="w-full text-center px-6 py-3 text-[11px] font-bold uppercase tracking-[0.15em] text-white bg-red-950/20 border border-red-900/20 rounded-full flex items-center justify-center gap-3 transition-all"
+                        >
+                            <LogOut size={14} /> Sign Out
+                        </button>
+                    )}
+                </div>
+            )}
+        </nav>
+    );
+}
+
+// ── Footer ─────────────────────────────────────────────
+function Footer() {
+    return (
+        <footer className="bg-black border-t border-white/5 pt-24 pb-12 mt-auto font-outfit">
+            <div className="max-w-7xl mx-auto px-6">
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-16 md:gap-8 mb-24">
+                    <div className="md:col-span-12 lg:col-span-4">
+                        <Link to="/" className="text-xl font-bold tracking-[0.5em] text-white mb-8 block uppercase">
+                            Polaris
+                        </Link>
+                        <p className="text-zinc-600 font-light text-[14px] tracking-wide leading-relaxed max-w-sm">
+                            The definitive operating system for high-performance productivity, adaptive learning, and cognitive clarity.
+                        </p>
+                    </div>
+
+                    <div className="md:col-span-4 lg:col-span-2 lg:ml-auto">
+                        <h4 className="text-[10px] font-bold uppercase tracking-[0.4em] text-zinc-700 mb-10">Architecture</h4>
+                        <ul className="space-y-5 text-zinc-500 font-medium text-[12px] tracking-widest uppercase">
+                            <li><Link to="/features" className="hover:text-white transition-colors">Neural Matrix</Link></li>
+                            <li><Link to="/optimization" className="hover:text-white transition-colors">Optimization</Link></li>
+                        </ul>
+                    </div>
+
+                    <div className="md:col-span-4 lg:col-span-2">
+                        <h4 className="text-[10px] font-bold uppercase tracking-[0.4em] text-zinc-700 mb-10">Terminal</h4>
+                        <ul className="space-y-5 text-zinc-500 font-medium text-[12px] tracking-widest uppercase">
+                            <li><Link to="/manifesto" className="hover:text-white transition-colors">Manifesto</Link></li>
+                            <li><Link to="/logs" className="hover:text-white transition-colors">Kernel Logs</Link></li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div className="pt-12 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-10">
+                    <p className="text-zinc-800 font-bold tracking-[0.5em] text-[9px] uppercase">
+                        © {new Date().getFullYear()} POLARIS OPERATIONAL SYSTEM.
+                    </p>
+                    <div className="flex gap-4">
+                        {[Zap, LayoutDashboard, UserCircle].map((Icon, i) => (
+                            <button key={i} className="text-zinc-800 hover:text-white transition-all">
+                                <Icon size={16} strokeWidth={1} />
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </footer>
+    );
+}
+
+// ── App Layout ──────────────────────────────────────────
+function AppLayout({ children, noFooter = false }) {
+    return (
+        <div className="flex flex-col min-h-screen pt-14 font-outfit selection:bg-white selection:text-black">
+            <Navbar />
+            <main className="flex-1">
+                {children}
+            </main>
+            {!noFooter && <Footer />}
+        </div>
+    );
+}
+
+// ── App ─────────────────────────────────────────────────
+// Suspense fallback for lazy-loaded pages
+function GamificationFallback() {
+    return (
+        <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
+            <div style={{ textAlign: 'center', fontFamily: "'Outfit', sans-serif" }}>
+                <Loader2 size={24} style={{ color: 'rgba(255,255,255,0.3)', marginBottom: '12px', animation: 'spin 1s linear infinite' }} />
+                <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Loading...</div>
+            </div>
+        </div>
+    );
+}
+
+export default function App() {
+    return (
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <XPProvider>
+                <AuthProvider>
+
+                    <Routes>
+                        {/* Public Routes */}
+                        <Route path="/" element={<AppLayout><LandingPage /></AppLayout>} />
+                        <Route path="/features" element={<AppLayout><FeaturesPage /></AppLayout>} />
+                        <Route path="/docs" element={<AppLayout><DocsPage /></AppLayout>} />
+                        <Route path="/login" element={<LoginPage />} />
+                        <Route path="/register" element={<RegisterPage />} />
+
+                        {/* Protected Private Routes */}
+                        <Route path="/dashboard" element={
+                            <ProtectedRoute>
+                                <AppLayout><DashboardPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/productivity" element={
+                            <ProtectedRoute>
+                                <AppLayout><ProductivityPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/learning" element={
+                            <ProtectedRoute>
+                                <AppLayout><LearningPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/quiz" element={
+                            <ProtectedRoute>
+                                <AppLayout><QuizPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/parental" element={<Navigate to="/parental/status" replace />} />
+                        <Route path="/parental/status" element={
+                            <ProtectedRoute>
+                                <AppLayout><ParentalStatusPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/parental/connections" element={
+                            <ProtectedRoute>
+                                <AppLayout><ParentalConnectionsPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/parental/courses" element={
+                            <ProtectedRoute>
+                                <AppLayout><ParentalCourseGeneratorPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/parental-legacy" element={
+                            <ProtectedRoute>
+                                <AppLayout><ParentalPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/settings" element={
+                            <ProtectedRoute>
+                                <AppLayout><SettingsPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/notifications" element={
+                            <ProtectedRoute>
+                                <AppLayout><NotificationsPage /></AppLayout>
+                            </ProtectedRoute>
+                        } />
+
+                        {/* Gamification Routes (lazy loaded) */}
+                        <Route path="/skill-tree" element={
+                            <ProtectedRoute>
+                                <AppLayout>
+                                    <Suspense fallback={<GamificationFallback />}>
+                                        <SkillTreePage />
+                                    </Suspense>
+                                </AppLayout>
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/analytics" element={
+                            <ProtectedRoute>
+                                <AppLayout>
+                                    <Suspense fallback={<GamificationFallback />}>
+                                        <AnalyticsPage />
+                                    </Suspense>
+                                </AppLayout>
+                            </ProtectedRoute>
+                        } />
+
+                        {/* Lab IDE Route — only accessible with ?plan=...&chapter=... from Learning page */}
+                        <Route path="/lab" element={
+                            <ProtectedRoute>
+                                <AppLayout noFooter>
+                                    <Suspense fallback={<GamificationFallback />}>
+                                        <LabPage />
+                                    </Suspense>
+                                </AppLayout>
+                            </ProtectedRoute>
+                        } />
+
+                        {/* Static Information Routes */}
+                        <Route path="/manifesto" element={<AppLayout><ManifestoPage /></AppLayout>} />
+                        <Route path="/privacy" element={<AppLayout><PrivacyPage /></AppLayout>} />
+                        <Route path="/logs" element={<AppLayout><LogsPage /></AppLayout>} />
+                        <Route path="/optimization" element={<AppLayout><OptimizationPage /></AppLayout>} />
+                        <Route path="/security" element={<AppLayout><SecurityPage /></AppLayout>} />
+
+                        <Route path="*" element={<Navigate to="/" replace />} />
+                    </Routes>
+                </AuthProvider>
+            </XPProvider>
+        </BrowserRouter>
+    );
+}
+
+
+=== extension/content/contentScript.js (Chrome Extension Content Script) ===
+/**
+ * LifeOS – Content Script
+ * Communicates with background.js using chrome.runtime.sendMessage()
+ * with retry-on-failure, acknowledgment response, and timeout handling.
+ * Prevents silent message drops.
+ */
+
+(() => {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY = 1000;
+    const MESSAGE_TIMEOUT = 5000;
+
+    /**
+     * Safety check for extension context.
+     * Prevents "Extension context invalidated" errors.
+     */
+    function isContextValid() {
+        if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) {
+            console.log('[LifeOS] Context invalidated. Detaching listeners.');
+            stopAll();
+            return false;
+        }
+        return true;
+    }
+
+    function stopAll() {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.removeEventListener('message', handleWindowMessage);
+    }
+
+    /**
+     * Send message to background with retry and acknowledgment.
+     * @param {Object} message 
+     * @param {number} retries 
+     * @returns {Promise<Object>}
+     */
+    function sendMessageWithRetry(message, retries = MAX_RETRIES) {
+        return new Promise((resolve, reject) => {
+            if (!isContextValid()) {
+                reject(new Error('Extension context invalidated'));
+                return;
+            }
+
+            let attempt = 0;
+            // ... (rest of sendMessageWithRetry) ...
+            function trySend() {
+                attempt++;
+
+                // Timeout wrapper
+                const timeoutId = setTimeout(() => {
+                    if (attempt < retries) {
+                        console.log(`[CS] Retry ${attempt}/${retries}: ${message.type}`);
+                        setTimeout(trySend, RETRY_DELAY * attempt);
+                    } else {
+                        reject(new Error(`Message timeout after ${retries} attempts`));
+                    }
+                }, MESSAGE_TIMEOUT);
+
+                try {
+                    if (!isContextValid()) {
+                        clearTimeout(timeoutId);
+                        reject(new Error('Context invalidated during send attempt'));
+                        return;
+                    }
+                    chrome.runtime.sendMessage(message, (response) => {
+                        clearTimeout(timeoutId);
+
+                        if (chrome.runtime.lastError) {
+                            console.warn('[CS] Message error:', chrome.runtime.lastError.message);
+                            if (attempt < retries) {
+                                setTimeout(trySend, RETRY_DELAY * attempt);
+                            } else {
+                                reject(new Error(chrome.runtime.lastError.message));
+                            }
+                            return;
+                        }
+
+                        // Check acknowledgment
+                        if (response && response.ack) {
+                            resolve(response);
+                        } else if (attempt < retries) {
+                            setTimeout(trySend, RETRY_DELAY * attempt);
+                        } else {
+                            reject(new Error('No acknowledgment received'));
+                        }
+                    });
+                } catch (error) {
+                    clearTimeout(timeoutId);
+                    if (error.message?.includes('context invalidated')) {
+                        stopAll();
+                        reject(error);
+                    } else if (attempt < retries) {
+                        setTimeout(trySend, RETRY_DELAY * attempt);
+                    } else {
+                        reject(error);
+                    }
+                }
+            }
+
+            trySend();
+        });
+    }
+
+    // ── Page Visibility Tracking ──────────────────────────
+    function handleVisibilityChange() {
+        sendMessageWithRetry({
+            type: 'FOCUS_UPDATE',
+            data: {
+                visible: !document.hidden,
+                timestamp: new Date().toISOString(),
+            },
+        }).catch(err => {
+            // Non-critical, don't crash
+            console.debug('[CS] Focus update failed:', err.message);
+        });
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // ── Expose status query for popup ─────────────────────
+    function handleWindowMessage(event) {
+        if (event.data && event.data.type === 'POLARIS_STATUS_REQUEST') {
+            sendMessageWithRetry({ type: 'GET_STATUS' })
+                .then(response => {
+                    if (isContextValid()) {
+                        window.postMessage({
+                            type: 'POLARIS_STATUS_RESPONSE',
+                            data: response.data,
+                        }, '*');
+                    }
+                })
+                .catch(() => { });
+        } else if (event.data && event.data.type === 'POLARIS_SET_MODE') {
+            sendMessageWithRetry({
+                type: 'UPDATE_SETTING',
+                data: { key: 'blocking_mode', value: event.data.mode }
+            }).catch(() => { });
+        } else if (event.data && event.data.type === 'POLARIS_SET_PENDING_CHAPTER') {
+            // Frontend tells extension which chapter the user is searching a video for
+            console.log('[CS] Pending chapter set:', event.data.data);
+            sendMessageWithRetry({
+                type: 'SET_PENDING_CHAPTER',
+                data: event.data.data
+            }).then(() => {
+                window.postMessage({ type: 'POLARIS_PENDING_CHAPTER_ACK' }, '*');
+            }).catch(() => { });
+        }
+    }
+    window.addEventListener('message', handleWindowMessage);
+
+    console.log('[LifeOS] Content script loaded');
+})();
+
+
