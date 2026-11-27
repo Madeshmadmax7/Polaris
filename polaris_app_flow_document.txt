@@ -1,0 +1,669 @@
+================================================================================
+POLARIS (LifeOS) — COMPREHENSIVE APP FLOW & SYSTEM ARCHITECTURE DOCUMENT
+================================================================================
+Document Type: End-to-End System Examination, Architecture & Technical Data Flow
+Platform: POLARIS (Productivity-Oriented Learning Analytics & Real-Time Intelligent System)
+Ecosystem: Chrome Extension (MV3), Windows Desktop Tracker, FastAPI Backend, React 18 SPA,
+           AI/NLP Semantic Layer (all-MiniLM-L6-v2), Sandboxed Lab Runtime, MySQL/SQLite DB
+================================================================================
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. Executive Summary & Core System Philosophy
+2. High-Level Ecosystem Architecture
+3. Dual-Layer Telemetry & Ingestion Flow (Chrome Extension + Desktop Tracker)
+4. Activity Processing, Aggregation & Scoring Pipeline (Productivity & Focus Factor)
+5. Three-Tier AI Content Classification Engine (Embedding Cascade & Thresholds)
+6. Adaptive Learning & Curriculum Orchestration Flow (AI Plans, Progress & Memory)
+7. Polaris Lab: Sandboxed Code Execution & Verification Flow
+8. Ethical Parental Governance & Anti-Circumvention Control Flow
+9. Gamification, Motivation & Dynamic Skill Tree Flow
+10. Step-by-Step End-to-End User Journey Walkthroughs
+11. Database Entity-Relationship & Data Models Reference
+12. Key Architectural Invariants & Production Safety Guarantees
+
+
+================================================================================
+1. EXECUTIVE SUMMARY & CORE SYSTEM PHILOSOPHY
+================================================================================
+
+POLARIS (LifeOS) is designed to solve fundamental flaws in contemporary digital
+well-being, learning management, and parental oversight tools:
+
+1. Binary Blocking Failure:
+   Traditional content blockers treat domains uniformly (e.g., youtube.com is
+   either whitelisted or blacklisted). On mixed-use platforms, educational
+   lectures and entertainment videos exist on the exact same domain. POLARIS
+   solves this by evaluating content semantically at the individual video/page
+   level using sentence embeddings.
+
+2. Siloed Systems:
+   Commercial trackers (RescueTime, Toggl) monitor time without understanding
+   learning outcomes. Learning Management Systems (Moodle, Canvas) manage
+   curricula but lack real-time distraction telemetry. POLARIS unifies client
+   telemetry directly with adaptive study plans and verified coding labs.
+
+3. Surveillance vs. Privacy Paradox in Parental Controls:
+   Traditional parental software logs keystrokes, browser histories, and private
+   chats, eroding trust. POLARIS implements an ethical parental oversight
+   architecture based on voluntary OTP pairing, domain-level aggregation, and
+   strict privacy filters (no search queries, chats, or full URLs stored).
+
+
+================================================================================
+2. HIGH-LEVEL ECOSYSTEM ARCHITECTURE
+================================================================================
+
+                               +-----------------------+
+                               |     USER CLIENTS      |
+                               +-----------+-----------+
+                                           |
+                 +-------------------------+-------------------------+
+                 |                                                   |
+                 v                                                   v
+   +---------------------------+                       +---------------------------+
+   |  Chrome Browser Extension |                       |   Windows Desktop Tracker |
+   |       (Manifest V3)       |                       |      (Native Python / C)  |
+   | - Active tab telemetry    |                       | - Win32 foreground poll   |
+   | - YouTube chapter syncer  |                       | - GetLastInputInfo idle   |
+   | - Shadow DOM blocker      |                       | - Yields to browser ext   |
+   +-------------+-------------+                       +-------------+-------------+
+                 |                                                   |
+                 | HTTPS / WSS (JSON)                                | HTTPS (Bearer Auth)
+                 v                                                   v
+   +-------------------------------------------------------------------------------+
+   |                           FASTAPI BACKEND (Uvicorn)                           |
+   |                                                                               |
+   |  /tracking        -> Telemetry ingestion, batching, desktop app classifier    |
+   |  /ai              -> Study plan generation, video chaptering, quiz generator  |
+   |  /lab             -> Coding tasks, multi-lang test runner, sandbox execution  |
+   |  /parental        -> OTP handshake, child connections, category rollups       |
+   |  /gamification    -> Dynamic skill tree, achievements, XP, daily quests       |
+   |  /ws              -> Real-time WebSocket connection manager                   |
+   +-----------------------+-----------------------+-------------------------------+
+                           |                       |
+            +--------------+                       +---------------+
+            |                                                      |
+            v                                                      v
+   +------------------------+                             +------------------------+
+   |   PERSISTENCE LAYER    |                             |   AI & NLP INFERENCE   |
+   | - SQLite / MySQL       |                             | - all-MiniLM-L6-v2     |
+   | - Pre-aggregated daily |                             |   (384-dim embeddings) |
+   |   summaries            |                             | - Cosine similarity    |
+   | - Cascade relationships|                             | - FAISS vector cache   |
+   +------------------------+                             +------------------------+
+            |                                                      |
+            +------------------------------+-----------------------+
+                                           |
+                                           v
+                        +------------------------------------+
+                        |       REACT 18 FRONTEND SPA        |
+                        |         (Vite + Tailwind)          |
+                        | - Real-time productivity dashboard |
+                        | - Interactive video learning room  |
+                        | - Polaris Lab in-browser IDE       |
+                        | - Skill tree & achievement tracker |
+                        | - Ethical parental governance panel|
+                        +------------------------------------+
+
+
+================================================================================
+3. DUAL-LAYER TELEMETRY & INGESTION FLOW
+================================================================================
+
+To ensure accurate time tracking across both web browsers and native desktop
+applications without duplicate counting, POLARIS utilizes a dual-layer tracking
+architecture.
+
+--------------------------------------------------------------------------------
+A. Detection & Deduplication Protocol
+--------------------------------------------------------------------------------
+
+[User Activity on Device]
+          |
+          +--> Focused on Web Browser (Chrome, Edge, Brave, Firefox, Opera, Arc)
+          |         |
+          |         |-- 1. Desktop tracker samples active foreground window via
+          |         |      win32gui.GetForegroundWindow() and inspects process name.
+          |         |-- 2. Matches process against NEUTRAL_APPS browser binary set:
+          |         |      {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
+          |         |       "opera.exe", "vivaldi.exe", "safari.exe", "arc.exe"}.
+          |         |-- 3. Desktop tracker marks state as "neutral" with 0 duration
+          |         |      and yields entirely to the Chrome Extension.
+          |         |-- 4. Chrome Extension handles fine-grained per-site tracking.
+          |
+          +--> Focused on Native Desktop App (VS Code, Discord, Steam, Terminal)
+                    |
+                    |-- 1. Desktop tracker samples foreground window.
+                    |-- 2. Checks idle state via Windows GetLastInputInfo API.
+                    |      If idle time > 60s, time accumulation pauses immediately.
+                    |-- 3. Resolves friendly application name via app_resolver.py.
+                    |-- 4. Classifies app category ("productive", "distracting", "neutral").
+                    |-- 5. Flushes session batch to /tracking/log every 10 polls or
+                           when window focus changes.
+
+--------------------------------------------------------------------------------
+B. Chrome Extension Telemetry Components
+--------------------------------------------------------------------------------
+- Background Service Worker (background.js):
+  Listens to chrome.tabs.onActivated and chrome.tabs.onUpdated events. Maintains
+  active tracking state across service worker sleep cycles via chrome.storage.local.
+  Uses chrome.alarms for periodic wakeups and flush triggers.
+
+- Content Scripts:
+  * focusTracker.js: Monitors user interaction events (mouse movement, clicks,
+    keyboard input) to distinguish active reading from background tabs.
+  * scrollTracker.js: Measures reading engagement by tracking vertical scroll
+    depth down the page.
+  * youtubeTracker.js: Hooks directly into the HTML5 <video> element on YouTube.
+    Extracts video ID, current playback timestamp, total duration, and playback
+    rate, reporting real-time progress to the learning pipeline.
+
+- Offline Buffer Queue:
+  If the network connection drops or the backend is offline, activity packets
+  are queued locally in 'tracking_queue' in chrome.storage. When connection is
+  restored, the queue flushes automatically via POST /tracking/batch.
+
+--------------------------------------------------------------------------------
+C. Privacy-Preserving Data Sanitization
+--------------------------------------------------------------------------------
+- Client-Side Scrubbing:
+  URLs are stripped to their hostname/domain before network transmission. Query
+  parameters, pathnames, and search terms are erased.
+- Field Length Constraints:
+  Schema validation strictly truncates domain names to 255 chars, page titles
+  to 500 chars, and classification categories to 20 chars.
+- Sensitive Domain Masking:
+  Personal communication, email, and banking domains (mail.google.com,
+  web.whatsapp.com, discord.com) are sanitized and never exposed in cleartext
+  to parental dashboards or activity logs.
+
+
+================================================================================
+4. ACTIVITY PROCESSING, AGGREGATION & SCORING PIPELINE
+================================================================================
+
+When telemetry hits the backend (/tracking/log or /tracking/batch), the ingestion
+pipeline processes the session:
+
+                  [Incoming Telemetry Log]
+                             |
+                             v
+                 [ingest_tracking_log()]
+                             |
+         +-------------------+-------------------+
+         |                                       |
+         v                                       v
+[Persist TrackingLog]                 [Recompute DailySummary]
+- user_id, domain, category           - total_active_seconds
+- duration_seconds, tab_switches      - productive_seconds
+- scroll_depth, timestamp             - neutral_seconds
+                                      - distracting_seconds
+                                      - focus_factor
+                                      - productivity_score
+                                                 |
+                                                 v
+                                  [WebSocket Broadcast Manager]
+                                                 |
+                                                 v
+                                   [React Live UI Dynamic Update]
+
+--------------------------------------------------------------------------------
+Mathematical Formulations
+--------------------------------------------------------------------------------
+
+1. Focus Factor (FF):
+   Measures attention fragmentation by comparing tab switches against productive
+   time:
+   
+   FF = max( 0.1, 1.0 - ( Total_Tab_Switches / (Productive_Minutes * 2) ) )
+   
+   Frequent switching between tabs during work reduces the multiplier.
+
+2. Productivity Score (PS):
+   Calculates the normalized daily score (0 to 100):
+   
+   PS = [ (Productive_Seconds * 1.0 + Neutral_Seconds * 0.5) / Total_Active_Seconds ]
+        * 100 * FF
+
+3. Pre-Aggregated Rollups (DailySummary table):
+   Calculations are pre-aggregated per user per day. When a user or parent
+   opens the analytics view, the system reads pre-calculated summary records
+   instantly rather than executing expensive aggregate queries over millions
+   of granular tracking rows.
+
+
+================================================================================
+5. THREE-TIER AI CONTENT CLASSIFICATION ENGINE
+================================================================================
+
+To resolve the challenge of mixed-use platforms (such as YouTube), POLARIS
+deploys a three-tier classification hierarchy:
+
+              [New Video / Unknown Application Encountered]
+                                    |
+                                    v
+            +-----------------------------------------------+
+            |    TIER 1: Real-Time Sentence Embedding       |
+            |    Model: all-MiniLM-L6-v2 (384 Dimensions)   |
+            +-----------------------+-----------------------+
+                                    |
+                     Cosine Similarity (Dot Product)
+                                    |
+            +-----------------------+-----------------------+
+            |                                               |
+            v                                               v
+    Similarity >= 0.75                              0.65 <= Sim < 0.75
+    [AUTOMATIC MATCH]                               [CANDIDATE CONFIRMATION]
+    Classified as Productive.                       Checked against secondary
+    Credited to active Study Plan.                  keyword weights & channel.
+            |                                               |
+            +-----------------------+-----------------------+
+                                    | (If Similarity < 0.65)
+                                    v
+            +-----------------------------------------------+
+            |     TIER 2: Weighted Keyword Analysis         |
+            | Matches title tokens against AI importance    |
+            | weights generated during plan creation        |
+            +-----------------------+-----------------------+
+                                    |
+                                    v (If No Keyword Match)
+            +-----------------------------------------------+
+            |     TIER 3: Domain & Dynamic ML Heuristics    |
+            | User domain categories, global defaults, or   |
+            | desktop NLP app classifier (/classify-app)    |
+            +-----------------------------------------------+
+
+Model Execution Details:
+- The all-MiniLM-L6-v2 transformer model is loaded once as a singleton during
+  FastAPI application startup, avoiding per-request initialization latency.
+- Vectors are L2-normalized upon generation. Consequently, cosine similarity is
+  computed as a simple dot product, running in under 15ms per evaluation.
+- Unknown desktop applications are analyzed via /tracking/classify-app, which
+  evaluates process names and window titles to assign categories dynamically.
+
+
+================================================================================
+6. ADAPTIVE LEARNING & CURRICULUM ORCHESTRATION FLOW
+================================================================================
+
+POLARIS operates as an intelligent personal tutor, generating curricula from
+user goals or syllabus documents and dynamically adapting to student progress.
+
+--------------------------------------------------------------------------------
+A. Study Plan Creation Flow
+--------------------------------------------------------------------------------
+1. Syllabus Ingestion:
+   The user submits a goal or uploads a syllabus document (PDF/TXT).
+   PyPDF2 extracts raw text via rag_service.py.
+2. LearnerProfile Memory Context:
+   The system queries the learner_profile table for the user:
+   - Retrieves previously mastered topics (topics from plans with quiz >= 60%).
+   - Retrieves weak topics (topics from plans with quiz < 60%).
+   - Injects rolling quiz score average.
+   - Tells the LLM prompt: "Skip beginner chapters already mastered; reinforce
+     weak areas; calibrate difficulty."
+3. LLM Generation:
+   The AI decomposes the syllabus into sequential chapters, curates top
+   educational YouTube videos, builds chapter importance keyword dictionaries,
+   computes chapter embeddings, and drafts post-course assessment quizzes.
+4. Persistence:
+   A StudyPlan record is created, and ChapterProgress records are initialized
+   for each chapter.
+
+--------------------------------------------------------------------------------
+B. Real-Time Video Learning Loop
+--------------------------------------------------------------------------------
+1. The student opens the learning player in the React app.
+2. youtubeTracker.js monitors HTML5 video playback events.
+3. Every few seconds, the extension reports playback progress directly to:
+   POST /ai/study-plan/{id}/chapter/{n}/update-progress
+4. Anti-Skimming Check:
+   Progress requires actual playback time. Scrubbing/seeking forward without
+   watching does not increment the verified watch time.
+5. Chapter Completion:
+   When verified watched time reaches >= 85% of total video duration:
+   - is_completed is set to True.
+   - An AI-generated summary of the video is saved to chapter_progress.
+   - The user is awarded +30 XP.
+6. Quiz Gating:
+   The final study plan assessment quiz (/quiz) remains strictly locked until
+   100% of the assigned chapters are verified as completed.
+
+--------------------------------------------------------------------------------
+C. Cross-Plan Knowledge Adaptation Loop
+--------------------------------------------------------------------------------
+1. Upon finishing all chapters, the student attempts the generated quiz.
+2. If the score is >= 60%:
+   - All chapter titles are appended to mastered_topics in LearnerProfile.
+   - Any previous entry in weak_plan_topics is removed.
+3. If the score is < 60%:
+   - The plan title is added to weak_plan_topics for future reinforcement.
+4. Rolling quiz average is updated.
+5. Subsequent study plan generations use this updated knowledge graph to skip
+   redundant concepts and tailor educational depth.
+
+
+================================================================================
+7. POLARIS LAB: SANDBOXED CODE EXECUTION & VERIFICATION FLOW
+================================================================================
+
+POLARIS Lab provides an integrated coding environment within the study flow
+to reinforce theoretical knowledge with practical coding challenges.
+
+                     [Student in Learning Mode]
+                                 |
+                     Clicks "Open Chapter in Lab"
+                                 |
+                                 v
+                     [GET /lab/tasks/{plan_id}]
+             Loads AI-generated programming challenges
+                                 |
+                                 v
+                   [Monaco In-Browser Code Editor]
+                   - Starter code preloaded
+                   - Language selector (Python, JS, C++, Java)
+                   - Structured hints & problem statement
+                                 |
+                                 v
+                     Student Clicks "Run Code"
+                                 |
+                                 v
+                     [POST /lab/run or /submit]
+                                 |
+                                 v
+                 [backend/app/services/sandbox_service.py]
+                                 |
+         +-----------------------+-----------------------+
+         |                                               |
+         v                                               v
+[Static Security Sanitization]              [Subprocess Sandbox Execution]
+- Blocks dangerous Python imports           - Max execution timeout: 10s
+  (os, sys, subprocess, socket, etc.)       - Memory/output cap: 50 KB
+- Rejects eval, exec, compile, globals      - Code size cap: 50 KB
+- Blocks dangerous C++ system calls         - Ephemeral working directory
+  (system, fork, execve, popen)                          |
+         |                                               |
+         +-----------------------+-----------------------+
+                                 |
+                                 v
+               [backend/app/services/code_verifier.py]
+               - Runs stdout against test cases (input/output)
+               - Measures execution time in milliseconds
+               - Evaluates test pass percentage
+               - Produces AI diagnostics on syntax or logic errors
+                                 |
+                                 v
+               [Persist CodingSubmission Record]
+               - Passed/Failed status recorded
+               - Awards +40 XP upon passing all test cases
+
+
+================================================================================
+8. ETHICAL PARENTAL GOVERNANCE & ANTI-CIRCUMVENTION FLOW
+================================================================================
+
+POLARIS models parental supervision as ethical guidance rather than invasive
+surveillance.
+
+--------------------------------------------------------------------------------
+A. 4-Digit OTP Handshake Protocol
+--------------------------------------------------------------------------------
+1. Connection Request:
+   A registered parent enters their child's email address in the parental portal.
+2. Code Generation:
+   The backend creates a pending record in parent_child_connections and generates
+   a random 4-digit OTP valid for 2 minutes.
+3. Secure Delivery:
+   The OTP is delivered solely to the child's in-app notification center
+   (notifications table). It is never returned to the parent in API responses.
+4. Voluntary Verification:
+   The child must voluntarily communicate the 4-digit code to the parent.
+   The parent submits the code via POST /parental/verify-otp.
+5. Activation:
+   Upon verification, connection status changes to "active", enabling aggregate
+   analytics access.
+
+--------------------------------------------------------------------------------
+B. Ethical Analytics View
+--------------------------------------------------------------------------------
+- What Parents CAN See:
+  Daily productivity score, focus factor, total productive hours, category
+  time distribution (Study vs. Coding vs. Rest), and assigned course progress.
+- What Parents CANNOT See:
+  Individual webpage URLs, browser search history, private messaging contents,
+  or individual video viewing logs.
+
+--------------------------------------------------------------------------------
+C. Anti-Circumvention Blocking Engine
+--------------------------------------------------------------------------------
+When a parent sets a domain block rule or activates a focus session:
+1. Instant Rule Sync:
+   The FastAPI backend pushes the updated rule set over WebSockets (/ws) to the
+   active Chrome Extension and Desktop Tracker.
+2. Declarative Rule Update:
+   The extension registers dynamic rules via chrome.declarativeNetRequest.
+3. Closed Shadow DOM Overlay (blockOverlay.js):
+   - When a blocked site is loaded, a full-screen blocking overlay is injected.
+   - The overlay attaches via element.attachShadow({ mode: 'closed' }).
+   - Closed mode prevents host page JavaScript and user styles from altering
+     or dismissing the block screen.
+4. Anti-Removal MutationObserver:
+   - A MutationObserver watches the document root.
+   - If a student opens DevTools and deletes or hides the overlay node, the
+     observer triggers immediately and re-attaches the block screen.
+5. Native Desktop Blocker (desktop_tracker/blocker.py):
+   - Monitors active window handles.
+   - If a blacklisted game or entertainment application gains focus, the tracker
+     minimizes or suppresses the window, notifying the user of active focus mode.
+
+
+================================================================================
+9. GAMIFICATION, MOTIVATION & DYNAMIC SKILL TREE FLOW
+================================================================================
+
+To sustain student motivation, all achievements, focus milestones, and study
+progress feed into a unified gamification layer.
+
+--------------------------------------------------------------------------------
+A. XP & Streak Engine
+--------------------------------------------------------------------------------
+- Activity Rewards:
+  * Complete Study Chapter Video: +30 XP
+  * Pass Chapter Lab Challenge:   +40 XP
+  * Complete Study Plan Quiz:     +50 XP
+  * Deep Work Hour Logged:        +25 XP
+- Streaks:
+  Daily active productive time (>= 30 mins) increments the user's daily streak.
+  Inactivity resets the streak count.
+
+--------------------------------------------------------------------------------
+B. Dynamic Skill Tree (skill_nodes & skill_subtopics tables)
+--------------------------------------------------------------------------------
+- Interactive Graph:
+  Structured skill nodes (e.g., Python Basics, Data Structures, Web Foundations)
+  are arranged in hierarchical tiers with prerequisites.
+- Node Mastery:
+  As students complete related chapters and lab coding tasks, node progress
+  percentages increment. Reaching 100% unlocks subsequent dependent skill nodes.
+- Badges & Achievements:
+  Automated achievement evaluators check criteria after each submission
+  (e.g., "Deep Work Demon" for 4 continuous hours of focus, "Syntax Master"
+  for 5 verified lab exercises).
+
+
+================================================================================
+10. STEP-BY-STEP END-TO-END USER JOURNEY WALKTHROUGHS
+================================================================================
+
+--------------------------------------------------------------------------------
+Journey 1: Student Daily Learning & Coding Flow
+--------------------------------------------------------------------------------
+1. Student starts their computer. The Desktop Tracker launches in the system tray.
+2. Student logs into the React web app; Chrome Extension initializes background
+   telemetry and connects to the WebSocket stream.
+3. Student navigates to /learning, selects "Algorithms & Data Structures", and
+   clicks on Chapter 2: "Binary Search Implementation".
+4. The curated YouTube video opens. youtubeTracker.js begins streaming playback
+   intervals to the backend. The Desktop Tracker yields OS-level tracking to
+   the extension.
+5. Upon reaching 85% video completion, the chapter marks as complete (+30 XP).
+6. Student clicks "Open in Lab" (/lab).
+7. Student writes a binary search algorithm in Python in the Monaco editor and
+   clicks "Submit".
+8. The sandbox executes the code inside an isolated subprocess against 5 hidden
+   test cases in 42ms. All tests pass (+40 XP).
+9. Student completes the final chapter, unlocking the post-plan Quiz.
+10. Student achieves an 85% quiz score. LearnerProfile updates "Binary Search"
+    as mastered, updates daily summary metrics, and awards the "Algorithm Scout" badge.
+
+--------------------------------------------------------------------------------
+Journey 2: Parental Connection & Focus Window Enforcement
+--------------------------------------------------------------------------------
+1. Parent signs up, selects the "Parent" role, and navigates to /parental/connections.
+2. Parent inputs the child's email address and clicks "Connect".
+3. An OTP notification appears on the child's dashboard.
+4. Child provides the 4-digit code. Parent inputs the code and verifies.
+5. The connection is established. Parent inspects daily productivity:
+   - Focus Factor: 0.91
+   - Total Study Time: 3.8 hours
+   - Distraction Time: 22 minutes
+6. Parent schedules an evening Focus Session from 7:00 PM to 9:00 PM, blocking
+   gaming domains and social platforms.
+7. At 7:00 PM, WebSocket rules propagate to the student's extension.
+8. If the student navigates to a blocked site, the closed Shadow DOM overlay
+   activates instantly, presenting a focus reminder.
+
+
+================================================================================
+11. DATABASE ENTITY-RELATIONSHIP & DATA MODELS REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+Core Database Schema (SQLAlchemy Models)
+--------------------------------------------------------------------------------
+
+1. User (users):
+   - id (UUID, PK)
+   - email (String(255), Unique, Indexed)
+   - username (String(100), Unique)
+   - hashed_password (String(255))
+   - role (String(20): "student" | "parent")
+   - focus_mode_until (DateTime, Nullable)
+   - created_at, updated_at (DateTime, UTC)
+
+2. ParentChildConnection (parent_child_connections):
+   - id (UUID, PK)
+   - parent_id (UUID, FK -> users.id, Cascade)
+   - child_id (UUID, FK -> users.id, Cascade)
+   - otp_code (String(4))
+   - otp_created_at (DateTime, UTC)
+   - verified (Boolean, Default False)
+   - status (String(20): "pending" | "active" | "expired")
+
+3. TrackingLog (tracking_logs):
+   - id (UUID, PK)
+   - user_id (UUID, FK -> users.id, Cascade, Indexed)
+   - domain (String(255), Indexed)
+   - category (String(20): "productive" | "neutral" | "distracting")
+   - duration_seconds (Integer)
+   - tab_switches (Integer)
+   - scroll_depth (Float)
+   - is_active (Boolean)
+   - page_title (String(500), Nullable)
+   - timestamp (DateTime, UTC, Indexed)
+
+4. DailySummary (daily_summaries):
+   - id (UUID, PK)
+   - user_id (UUID, FK -> users.id, Cascade, Indexed)
+   - date (DateTime, UTC, Indexed)
+   - total_active_seconds (Integer)
+   - productive_seconds (Integer)
+   - neutral_seconds (Integer)
+   - distracting_seconds (Integer)
+   - focus_factor (Float)
+   - productivity_score (Float)
+   - top_domains (JSON)
+
+5. StudyPlan (study_plans):
+   - id (UUID, PK)
+   - user_id (UUID, FK -> users.id, Cascade, Indexed)
+   - title (String(255))
+   - goal (Text)
+   - plan_data (JSON: chapters list, quiz definitions)
+   - duration_days (Integer)
+   - document_id (UUID, FK -> documents.id, Nullable)
+   - quiz_unlocked (Boolean, Default False)
+
+6. ChapterProgress (chapter_progress):
+   - id (UUID, PK)
+   - study_plan_id (UUID, FK -> study_plans.id, Cascade, Indexed)
+   - user_id (UUID, FK -> users.id, Cascade)
+   - chapter_index (Integer)
+   - chapter_title (String(255))
+   - youtube_url (String(500))
+   - video_duration_seconds (Integer)
+   - watched_seconds (Integer)
+   - chapter_embedding (JSON: 384-dimensional float vector)
+   - keyword_importance (JSON)
+   - is_completed (Boolean, Default False)
+   - completed_at (DateTime, Nullable)
+
+7. LearnerProfile (learner_profile):
+   - user_id (UUID, FK -> users.id, Cascade, PK)
+   - mastered_topics (JSON: list of topic strings)
+   - weak_plan_topics (JSON: list of topic strings)
+   - avg_quiz_score (Float)
+   - completed_plans (JSON: list of completed plan summaries)
+   - updated_at (DateTime, UTC)
+
+8. CodingTask (coding_tasks):
+   - id (UUID, PK)
+   - study_plan_id (UUID, FK -> study_plans.id, Cascade, Indexed)
+   - chapter_number (Integer)
+   - title (String(255))
+   - description (Text)
+   - difficulty (String(20): "easy" | "medium" | "hard")
+   - language (String(20): "python" | "javascript" | "cpp" | "java")
+   - starter_code (Text)
+   - solution (Text)
+   - test_cases (JSON: list of {"input", "expected_output"})
+
+9. CodingSubmission (coding_submissions):
+   - id (UUID, PK)
+   - user_id (UUID, FK -> users.id, Cascade, Indexed)
+   - task_id (UUID, FK -> coding_tasks.id, Cascade, Indexed)
+   - code (Text)
+   - passed (Boolean)
+   - score (Integer: 0 - 100)
+   - execution_time_ms (Float)
+   - test_results (JSON)
+
+
+================================================================================
+12. KEY ARCHITECTURAL INVARIANTS & SAFETY GUARANTEES
+================================================================================
+
+1. Deduplication Invariant:
+   A single unit of user screen time is never recorded twice. If a browser process
+   is detected by the desktop tracker, it yields duration measurement to the
+   browser extension.
+
+2. Anti-Circumvention Invariant:
+   DOM modifications by the user cannot disable blocked site overlays; the
+   closed Shadow DOM paired with a MutationObserver automatically restores the
+   blocking layer.
+
+3. Sandbox Isolation Invariant:
+   User code executed in Polaris Lab cannot access disk, network, or OS process
+   trees. Static AST blacklists reject dangerous operations before execution,
+   and subprocesses terminate strictly after 10 seconds.
+
+4. Ethical Privacy Invariant:
+   Parental accounts can access aggregate focus metrics and study completions,
+   but can never access raw search queries, chat conversations, or full URL paths.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
